@@ -134,23 +134,51 @@ class HMClient:
             # If modal didn't open automatically on /login, click the profile/account icon in header
             if not email_el:
                 await progress_cb("👤 Opening sign-in modal...")
+                clicked_prof = False
                 for psel in [
+                    "[data-testid='myAccount']",
                     "button[data-testid='myAccount']",
                     "a[data-testid='myAccount']",
-                    ".menu__myhm",
+                    "[data-testid*='account' i]",
+                    "a[href*='login']",
+                    "a[href*='signin']",
                     "button:has-text('Sign in')",
                     "button:has-text('Anmelden')",
                     "a:has-text('Sign in')",
                     "a:has-text('Anmelden')",
+                    "[aria-label*='anmelden' i]",
+                    "[aria-label*='account' i]",
+                    "[aria-label*='sign in' i]",
+                    ".menu__myhm",
+                    ".account-link",
                 ]:
                     try:
                         pbtn = await page.query_selector(psel)
                         if pbtn and await pbtn.is_visible():
                             await pbtn.click()
+                            clicked_prof = True
                             await asyncio.sleep(3)
                             break
                     except Exception:
                         continue
+
+                if not clicked_prof:
+                    try:
+                        await page.evaluate("""
+                            () => {
+                                const el = document.querySelector('[data-testid="myAccount"]') 
+                                  || Array.from(document.querySelectorAll('header a, header button, nav a, nav button')).find(e => {
+                                      const h = (e.href || '').toLowerCase();
+                                      const a = (e.getAttribute('aria-label') || '').toLowerCase();
+                                      const t = (e.textContent || '').toLowerCase();
+                                      return h.includes('login') || h.includes('signin') || a.includes('account') || a.includes('anmelden') || t.includes('anmelden');
+                                  });
+                                if (el) el.click();
+                            }
+                        """)
+                        await asyncio.sleep(3)
+                    except Exception:
+                        pass
 
                 # Now wait for email input
                 for sel in email_selectors:
@@ -308,30 +336,6 @@ class HMClient:
                 except Exception:
                     continue
 
-            # Handle terms/consent/agreement checkboxes ("I agree")
-            consent_selectors = [
-                "input[name*='terms']",
-                "input[name*='consent']",
-                "input[name*='agreement']",
-                "input[type='checkbox']",
-                "label[for*='terms']",
-                "label[for*='agree']",
-                "[data-testid*='terms']",
-                "[data-testid*='agree']",
-            ]
-            for sel in consent_selectors:
-                try:
-                    checkboxes = await page.query_selector_all(sel)
-                    for cb in checkboxes:
-                        if await cb.is_visible():
-                            if cb.tag_name == "LABEL":
-                                await cb.click()
-                            elif not await cb.is_checked():
-                                await cb.check()
-                            await asyncio.sleep(0.3)
-                except Exception:
-                    continue
-
             await progress_cb("✅ Form filled. Submitting registration...")
 
             # Check for CAPTCHA again before submit
@@ -348,16 +352,22 @@ class HMClient:
                         "details": "Please try again later",
                     }
 
-            # Click submit/register button
+            # Click submit/register button (English & German)
             submit_selectors = [
                 "button[type='submit']",
                 "button[data-testid*='register']",
                 "button[data-testid*='signup']",
-                "input[type='submit']",
-                "button:has-text('Register')",
-                "button:has-text('Sign up')",
                 "button:has-text('Create account')",
+                "button:has-text('Konto erstellen')",
+                "button:has-text('Register')",
+                "button:has-text('Registrieren')",
+                "button:has-text('Sign up')",
+                "button:has-text('Mitglied werden')",
                 "button:has-text('Join')",
+                "button:has-text('Sign in')",
+                "button:has-text('Anmelden')",
+                "button:has-text('Weiter')",
+                "input[type='submit']",
             ]
             submitted = False
             for sel in submit_selectors:
@@ -371,11 +381,12 @@ class HMClient:
                     continue
 
             if not submitted:
-                return {
-                    "success": False,
-                    "message": "Could not find submit button",
-                    "details": "Please complete registration manually on the H&M website.",
-                }
+                # Try pressing enter as fallback
+                try:
+                    await page.keyboard.press("Enter")
+                    submitted = True
+                except Exception:
+                    pass
 
             await asyncio.sleep(3)
 
