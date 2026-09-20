@@ -24,14 +24,15 @@ class HMClient:
         self.db = db
         self.cred = cred_mgr
 
-    def _get_urls(self, region: str) -> dict:
-        """Build H&M URLs for the given region."""
-        base = self.browser.db and "https://www2.hm.com" or "https://www2.hm.com"
+    def _get_urls(self, region: str = "de_de") -> dict:
+        """Build H&M URLs. Default to Germany (de_de)."""
+        base = "https://www2.hm.com"
+        reg = region or "de_de"
         return {
-            "register": f"{base}/{region}/member/register.html",
-            "login": f"{base}/{region}/member/signin.html",
-            "profile": f"{base}/{region}/member/my-account/account-overview.html",
-            "home": f"{base}/{region}/index.html",
+            "register": f"{base}/{reg}/login",
+            "login": f"{base}/{reg}/login",
+            "profile": f"{base}/{reg}/member/my-account/account-overview.html",
+            "home": f"{base}/{reg}/index.html",
         }
 
     # ── Account Creation ──────────────────────────────────────

@@ -192,29 +192,18 @@ async def get_code_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-    acc_info = ""
-    if context.user_data.get("gc_email"):
-        acc_info = f"\n👤 Account: `{mask_email(context.user_data['gc_email'])}`"
+    context.user_data["gc_region"] = "de_de"
 
-    if session or context.user_data.get("gc_email"):
-        await query.edit_message_text(
-            f"🎶 *Get Spotify Code from H&M*{acc_info}\n\n"
-            f"Select your H&M region:",
-            parse_mode="Markdown",
-            reply_markup=get_region_keyboard(),
-        )
-        context.user_data["gc_has_session"] = bool(session)
+    if session:
+        return await gc_process(update, context)
+    elif context.user_data.get("gc_email") and context.user_data.get("gc_password"):
+        return await gc_auto_login_and_retrieve(update, context)
     else:
         await query.edit_message_text(
-            "🎶 *Get Spotify Code from H&M*\n\n"
-            "⚠️ No active H&M session. You need to login first.\n\n"
-            "Select your H&M region:",
+            "🔑 Please send your *H&M email address* to login:",
             parse_mode="Markdown",
-            reply_markup=get_region_keyboard(),
         )
-        context.user_data["gc_has_session"] = False
-
-    return GC_SELECT_REGION
+        return GC_ENTER_EMAIL
 
 
 @authorized_only

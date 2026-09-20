@@ -47,12 +47,14 @@ async def hm_create_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry point: user clicked 'Create H&M Account'."""
     query = update.callback_query
     await query.answer()
+    context.user_data["hm_region"] = "de_de"
+
     await query.edit_message_text(
-        "🛒 *Create H&M Account*\n\nSelect your H&M region:",
+        "🛒 *Create H&M Account*\n\n"
+        "📧 Please send your *email address*:",
         parse_mode="Markdown",
-        reply_markup=get_region_keyboard(),
     )
-    return HM_SELECT_REGION
+    return HM_ENTER_EMAIL
 
 
 # ── Step 1: Region selected → Ask for email ──────────────
