@@ -379,9 +379,20 @@ async def redeem_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code_record = await db.get_latest_spotify_code()
     if code_record:
         code = cred.decrypt(code_record["code_encrypted"])
-        # Invalidate junk words like 'permission' that were scraped accidentally
-        JUNK_CODES = {"permission", "undefined", "cookie", "accept", "submit", "button", "none", "trial"}
-        if code.lower().strip() in JUNK_CODES:
+        # Invalidate any junk code scraped accidentally (pure English words, no digits = not a real code)
+        JUNK_CODES = {
+            "permission", "undefined", "cookie", "accept", "submit", "button", "none", "trial",
+            "subscribe", "standard", "membership", "overview", "benefit", "voucher", "account",
+            "settings", "profile", "details", "password", "continue", "register", "redeem",
+            "cancel", "login", "signup", "logout", "privacy", "terms", "help", "support",
+            "home", "index", "about", "contact", "error", "page", "month", "months",
+        }
+        # Also reject pure-letter strings with no digits (real codes always contain digits)
+        is_junk = (
+            code.lower().strip() in JUNK_CODES
+            or (code.isalpha() and not any(ch.isdigit() for ch in code))
+        )
+        if is_junk:
             await db.update_spotify_code_status(code_record["id"], "invalid")
             code_record = None
 

@@ -689,25 +689,56 @@ class HMClient:
                 if url_match:
                     redeem_url = url_match.group(0)
 
-            # Extract code if present inside the redeem_url (e.g. ?code=XYZ or /claim/XYZ)
-            if redeem_url:
-                code_match = re.search(r'(?:code|voucher|token|coupon)=([A-Za-z0-9_-]+)', redeem_url, re.IGNORECASE)
-                if not code_match:
-                    code_match = re.search(r'/redeem/([A-Za-z0-9_-]{6,30})', redeem_url, re.IGNORECASE)
-                if code_match:
-                    extracted_code = code_match.group(1)
-
-            # Blacklist of junk words that must NEVER be treated as a code
+            # Blacklist of junk words/paths — for BOTH URL and code validation
             JUNK_WORDS = {
                 "permission", "subscribe", "standard", "undefined", "membership",
                 "overview", "benefit", "voucher", "account", "settings", "profile",
                 "details", "password", "continue", "register", "redeem", "cancel",
-                "cookie", "accept", "submit", "button", "trial", "month", "months"
+                "cookie", "accept", "submit", "button", "trial", "month", "months",
+                "login", "signup", "logout", "privacy", "terms", "help", "support",
+                "home", "index", "about", "contact", "error", "page",
             }
-            if extracted_code and extracted_code.lower().strip() in JUNK_WORDS:
-                extracted_code = None
 
-            # Always prioritize the full redeem_url!
+            # Validate redeem_url — MUST be a real Spotify URL (not H&M internal links)
+            if redeem_url:
+                url_lower = redeem_url.lower()
+                if "spotify.com" not in url_lower:
+                    logger.warning(f"Discarding non-Spotify redeem_url: {redeem_url}")
+                    redeem_url = None
+                else:
+                    # Reject if last URL path segment is a junk word
+                    import urllib.parse
+                    path = urllib.parse.urlparse(redeem_url).path.rstrip("/")
+                    last_segment = path.split("/")[-1].lower()
+                    if last_segment in JUNK_WORDS:
+                        logger.warning(f"Discarding junk Spotify URL segment '{last_segment}': {redeem_url}")
+                        redeem_url = None
+
+            # Extract voucher code from inside redeem_url if it's valid
+            if redeem_url:
+                code_match = re.search(r'(?:code|voucher|token|coupon)=([A-Za-z0-9_\-]{6,30})', redeem_url, re.IGNORECASE)
+                if not code_match:
+                    # /redeem/XXXXX — only if XXXXX looks like a real code (has digits or mixed chars)
+                    code_match = re.search(r'/(?:redeem|claim|voucher)/([A-Za-z0-9_\-]{6,30})', redeem_url, re.IGNORECASE)
+                if code_match:
+                    candidate = code_match.group(1)
+                    if candidate.lower() not in JUNK_WORDS and (any(c.isdigit() for c in candidate) or not candidate.isalpha()):
+                        extracted_code = candidate
+
+            # Validate extracted_code — must be 6–30 chars, alphanumeric, NOT a junk word, has digits or is mixed case
+            if extracted_code:
+                c = extracted_code.strip()
+                is_real_code = (
+                    6 <= len(c) <= 30
+                    and c.lower() not in JUNK_WORDS
+                    and re.match(r'^[A-Za-z0-9_\-]+$', c)
+                    and (any(ch.isdigit() for ch in c) or not c.isalpha())
+                )
+                if not is_real_code:
+                    logger.warning(f"Discarding junk extracted_code: {c}")
+                    extracted_code = None
+
+            # Prioritize the full Spotify redeem_url, fallback to bare code
             code_to_save = redeem_url or extracted_code
 
             # If we got a redeem_url or code:
