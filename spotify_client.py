@@ -307,15 +307,13 @@ class SpotifyClient:
             if context:
                 await context.close()
 
-    # ── Login ─────────────────────────────────────────────────
-
     async def login(
         self,
         email: str,
         password: str,
         progress_cb: ProgressCallback,
     ) -> dict:
-        """Log into Spotify with email/password. Saves session on success."""
+        """Log into Spotify with email/password. Saves session ONLY on verified success."""
         context = None
         page = None
 
@@ -324,17 +322,24 @@ class SpotifyClient:
             context = await self.browser.get_context("spotify")
             page = await context.new_page()
 
-            await page.goto(SPOTIFY_URLS["login"], wait_until="domcontentloaded", timeout=30000)
+            await page.goto(SPOTIFY_URLS["login"], wait_until="networkidle", timeout=30000)
             await asyncio.sleep(2)
 
-            # Dismiss cookie banner if present
-            try:
-                cookie_btn = await page.query_selector("button#onetrust-accept-btn-handler, button:has-text('Accept Cookies')")
-                if cookie_btn and await cookie_btn.is_visible():
-                    await cookie_btn.click()
-                    await asyncio.sleep(1)
-            except Exception:
-                pass
+            # Dismiss cookie/consent banner
+            for cookie_sel in [
+                "button#onetrust-accept-btn-handler",
+                "button[data-testid='accept-cookies-banner']",
+                "button:has-text('Accept cookies')",
+                "button:has-text('Accept')",
+            ]:
+                try:
+                    btn = await page.query_selector(cookie_sel)
+                    if btn and await btn.is_visible():
+                        await btn.click()
+                        await asyncio.sleep(1)
+                        break
+                except Exception:
+                    continue
 
             if await self.browser.detect_captcha(page):
                 await progress_cb("🛡️ CAPTCHA detected! Please complete manually. Waiting...")
@@ -344,104 +349,198 @@ class SpotifyClient:
 
             await progress_cb("🔑 Entering Spotify credentials...")
 
-            # Fill email/username
-            for sel in ["input[id='login-username']", "input[name='username']", "input[type='email']", "input[type='text']"]:
+            # Find username field — Spotify uses id="login-username"
+            username_filled = False
+            for sel in [
+                "input[id='login-username']",
+                "input[name='username']",
+                "input[autocomplete='username']",
+                "input[type='email']",
+            ]:
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
+                        await el.triple_click()
                         await el.fill(email)
+                        username_filled = True
                         break
                 except Exception:
                     continue
 
-            # Fill password
-            for sel in ["input[id='login-password']", "input[name='password']", "input[type='password']"]:
+            if not username_filled:
+                return {
+                    "success": False,
+                    "message": "❌ Could not find Spotify username field",
+                    "details": "Spotify may have updated their login page. Try again.",
+                }
+
+            # Find password field — Spotify uses id="login-password"
+            password_filled = False
+            for sel in [
+                "input[id='login-password']",
+                "input[name='password']",
+                "input[autocomplete='current-password']",
+                "input[type='password']",
+            ]:
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
+                        await el.triple_click()
                         await el.fill(password)
+                        password_filled = True
                         break
                 except Exception:
                     continue
 
-            # Submit
-            submitted = False
-            for sel in ["button[data-testid='login-button']", "button[id='login-button']", "button[type='submit']", "button:has-text('Log in')", "button:has-text('Sign in')"]:
+            if not password_filled:
+                return {
+                    "success": False,
+                    "message": "❌ Could not find Spotify password field",
+                    "details": "Spotify may have updated their login page. Try again.",
+                }
+
+            # Small delay so browser registers the filled credentials
+            await asyncio.sleep(0.5)
+
+            # Click the Login/Submit button
+            login_clicked = False
+            for sel in [
+                "button[data-testid='login-button']",
+                "button[id='login-button']",
+                "button[type='submit']",
+                "button:has-text('Log in')",
+                "button:has-text('Sign in')",
+            ]:
                 try:
                     btn = await page.query_selector(sel)
-                    if btn and await btn.is_visible():
+                    if btn and await btn.is_visible() and await btn.is_enabled():
                         await btn.click()
-                        submitted = True
+                        login_clicked = True
                         break
                 except Exception:
                     continue
 
-            if not submitted:
-                try:
-                    await page.keyboard.press("Enter")
-                    submitted = True
-                except Exception:
-                    pass
+            if not login_clicked:
+                await page.keyboard.press("Enter")
 
-            # Wait for navigation away from /login
+            # ── Wait for the outcome — URL must change OR error must appear ──
+            # Spotify either: redirects away from /login (success), or shows an error message (failure)
             try:
-                await page.wait_for_url(lambda u: "/login" not in u.lower(), timeout=12000)
+                # Wait up to 15s for either: URL change, error alert, or CAPTCHA
+                await page.wait_for_function(
+                    """() => {
+                        const url = window.location.href.toLowerCase();
+                        const gone = !url.includes('/login');
+                        const err = document.querySelector(
+                            '[data-testid="login-error"], #login__error-message, [class*="error"], [role="alert"]'
+                        );
+                        const hasErr = err && err.textContent.trim().length > 0;
+                        return gone || hasErr;
+                    }""",
+                    timeout=15000,
+                )
             except Exception:
-                pass
+                pass  # timed out — we'll check manually below
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
 
+            current_url = page.url
+            current_url_lower = current_url.lower()
+
+            # 1. Check for error messages FIRST (wrong password, etc.)
+            error_texts = []
+            for err_sel in [
+                "[data-testid='login-error']",
+                "#login__error-message",
+                "[class*='error-message']",
+                "[class*='ErrorMessage']",
+                "[role='alert']",
+                "p[class*='error']",
+                "span[class*='error']",
+            ]:
+                try:
+                    err_el = await page.query_selector(err_sel)
+                    if err_el and await err_el.is_visible():
+                        txt = (await err_el.inner_text()).strip()
+                        if txt:
+                            error_texts.append(txt)
+                except Exception:
+                    continue
+
+            page_text = await page.inner_text("body")
+            error_keywords = [
+                "incorrect username or password",
+                "wrong password",
+                "invalid username",
+                "incorrect password",
+                "no account",
+                "doesn't match",
+                "username and password",
+                "try again",
+            ]
+            error_in_page = any(kw in page_text.lower() for kw in error_keywords)
+
+            if error_texts or error_in_page:
+                err_msg = error_texts[0] if error_texts else "Incorrect credentials"
+                return {
+                    "success": False,
+                    "message": f"❌ Spotify login failed — {err_msg}",
+                    "details": "Please check your email and password.",
+                }
+
+            # 2. Check for CAPTCHA
             if await self.browser.detect_captcha(page):
                 await progress_cb("🛡️ CAPTCHA appeared! Please complete manually. Waiting...")
                 resolved = await self.browser.wait_for_captcha_resolution(page)
                 if not resolved:
                     return {"success": False, "message": "CAPTCHA resolution timed out"}
 
-            current_url = page.url.lower()
-            page_content = await page.content()
-
-            # Check for 2FA/suspicious login
-            if any(x in page_content.lower() for x in ["two-factor", "2fa", "verification code", "suspicious", "confirm your identity"]):
+            # 3. Check for 2FA
+            if any(x in page_text.lower() for x in ["two-factor", "2fa", "verify your", "verification code", "enter the code", "confirm your identity"]):
                 await progress_cb(
-                    "🔐 2FA or suspicious login challenge detected!\n"
-                    "Please complete the verification manually.\n"
+                    "🔐 2FA detected! Please complete manually.\n"
                     "Waiting up to 5 minutes..."
                 )
                 try:
-                    await page.wait_for_url("**/account/**", timeout=300000)
+                    await page.wait_for_function(
+                        "() => !window.location.href.toLowerCase().includes('/login')",
+                        timeout=300000,
+                    )
+                    await asyncio.sleep(2)
+                    current_url = page.url
+                    current_url_lower = current_url.lower()
                 except Exception:
                     return {"success": False, "message": "2FA/verification timed out"}
 
-            # Check for incorrect credentials
-            if any(x in page_content.lower() for x in ["incorrect", "wrong password", "invalid username", "doesn't match"]):
+            # 4. STRICT SUCCESS CHECK — URL must have left /login AND sp_dc cookie must exist
+            if "/login" in current_url_lower and "accounts.spotify.com/login" in current_url_lower:
                 return {
                     "success": False,
-                    "message": "❌ Spotify login failed — incorrect credentials",
-                    "details": "Check your email and password.",
+                    "message": "❌ Spotify login failed — still on login page",
+                    "details": "Please double-check your email and password.",
                 }
 
-            # Check if login authenticated successfully (via auth cookies or navigation away from login)
+            # Verify Spotify auth cookie is actually present
             cookies = await context.cookies()
-            auth_cookie_names = {"sp_dc", "sp_t", "sp_key", "sp_m"}
-            has_auth_cookie = any(c.get("name") in auth_cookie_names for c in cookies)
+            sp_dc = next((c for c in cookies if c.get("name") == "sp_dc"), None)
 
-            if ("/login" not in current_url) or has_auth_cookie or any(x in current_url for x in ["account", "player", "home", "open.spotify"]):
-                await self.browser.save_session("spotify", context)
-                email_enc = self.cred.encrypt(email)
-                pass_enc = self.cred.encrypt(password)
-                await self.db.save_account(email_enc, pass_enc, "spotify", "active")
-                await self.db.log_operation("spotify_login", "success", email)
+            if not sp_dc:
                 return {
-                    "success": True,
-                    "message": "✅ Logged into Spotify successfully!",
-                    "email": email,
+                    "success": False,
+                    "message": "❌ Spotify login failed — no auth session created",
+                    "details": "Credentials may be incorrect, or Spotify requires verification.",
                 }
 
-            # Still stuck on login page
+            # All checks passed — genuinely authenticated
+            await self.browser.save_session("spotify", context)
+            email_enc = self.cred.encrypt(email)
+            pass_enc = self.cred.encrypt(password)
+            await self.db.save_account(email_enc, pass_enc, "spotify", "active")
+            await self.db.log_operation("spotify_login", "success", email)
             return {
-                "success": False,
-                "message": "❌ Spotify login failed — still on login page",
-                "details": "Please check your email and password, or check if Spotify prompted a verification challenge.",
+                "success": True,
+                "message": "✅ Logged into Spotify successfully!",
+                "email": email,
             }
 
         except Exception as e:
