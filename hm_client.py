@@ -69,25 +69,39 @@ class HMClient:
             except Exception:
                 pass
 
-            # Click profile/sign-in button in top right
+            # Click profile/sign-in button in top right or navigate to signin URL directly if needed
             await progress_cb("👤 Accessing profile/sign-in menu...")
             profile_selectors = [
                 "button[data-testid='myAccount']",
+                "a[data-testid='myAccount']",
                 ".menu__myhm",
                 "a[href*='signin']",
+                "a[href*='login']",
                 ".account-link",
-                "button:has-text('Sign in')"
+                "button:has-text('Sign in')",
+                "a:has-text('Sign in')",
+                "button:has-text('My Account')",
+                "a:has-text('My Account')"
             ]
+            clicked_profile = False
             for sel in profile_selectors:
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
                         await el.click()
+                        clicked_profile = True
                         break
                 except Exception:
                     continue
-            
-            await asyncio.sleep(3)
+
+            if not clicked_profile:
+                # Direct navigation fallback to signin URL
+                try:
+                    await page.goto(urls["login"], wait_until="domcontentloaded", timeout=20000)
+                except Exception:
+                    pass
+
+            await asyncio.sleep(4)
 
             # Check for CAPTCHA
             if await self.browser.detect_captcha(page):
@@ -99,13 +113,32 @@ class HMClient:
                 if not resolved:
                     return {"success": False, "message": "CAPTCHA resolution timed out", "details": "Try again later"}
 
-            await progress_cb("📝 Entering email to initiate registration...")
+            await progress_cb("📝 Entering details to initiate registration...")
+
+            # If there is a tab for "Register" / "Become a member" / "Create account", click it
+            for reg_tab_sel in [
+                "button:has-text('Register')",
+                "button:has-text('Become a member')",
+                "button:has-text('Create account')",
+                "a:has-text('Register')",
+                "a:has-text('Become a member')",
+                "[data-testid*='register']",
+            ]:
+                try:
+                    rtab = await page.query_selector(reg_tab_sel)
+                    if rtab and await rtab.is_visible():
+                        await rtab.click()
+                        await asyncio.sleep(2)
+                        break
+                except Exception:
+                    continue
 
             # Try multiple selector strategies for the email field
             email_selectors = [
                 "input[name='email']",
                 "input[type='email']",
                 "#email",
+                "input[id*='email' i]",
                 "input[data-testid='email-input']",
                 "input[placeholder*='email' i]",
             ]
@@ -120,21 +153,6 @@ class HMClient:
                         break
                 except Exception:
                     continue
-            
-            # Press enter or click continue to trigger the redirect to register page
-            if email_filled:
-                try:
-                    # Often H&M requires clicking a 'Continue' button after entering email
-                    continue_btn = await page.query_selector("button[data-testid='submit-button'], button[type='submit']")
-                    if continue_btn and await continue_btn.is_visible():
-                        await continue_btn.click()
-                    else:
-                        await page.keyboard.press("Enter")
-                except Exception:
-                    await page.keyboard.press("Enter")
-                
-                await asyncio.sleep(4)  # Wait for redirect to actual register page / password field to appear
-
 
             if not email_filled:
                 return {
@@ -148,6 +166,7 @@ class HMClient:
                 "input[name='password']",
                 "input[type='password']",
                 "#password",
+                "input[id*='password' i]",
                 "input[data-testid='password-input']",
             ]
             password_filled = False
@@ -162,28 +181,66 @@ class HMClient:
                 except Exception:
                     continue
 
-            if not password_filled:
-                return {
-                    "success": False,
-                    "message": "Could not find password field on registration page",
-                    "details": "H&M may have updated their website layout. Please register manually.",
-                }
+            # Fill extra fields: First Name & Date of Birth if requested/present
+            # 1. First Name / Name
+            name_selectors = [
+                "input[name='firstName']",
+                "input[name='first_name']",
+                "input[name='name']",
+                "input[id*='firstName' i]",
+                "input[placeholder*='First Name' i]",
+                "input[placeholder*='Name' i]",
+            ]
+            first_name = email.split("@")[0]
+            for sel in name_selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el and await el.is_visible():
+                        await el.click()
+                        await el.fill(first_name)
+                        break
+                except Exception:
+                    continue
 
-            # Handle terms/consent checkboxes if present
+            # 2. Date of Birth (e.g. DD/MM/YYYY or separate fields or input[type='date'])
+            dob_selectors = [
+                "input[name='dateOfBirth']",
+                "input[name='dob']",
+                "input[name='birthdate']",
+                "input[id*='dob' i]",
+                "input[placeholder*='DD/MM/YYYY' i]",
+                "input[placeholder*='YYYY-MM-DD' i]",
+            ]
+            for sel in dob_selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el and await el.is_visible():
+                        await el.click()
+                        await el.fill("01/01/1998")
+                        break
+                except Exception:
+                    continue
+
+            # Handle terms/consent/agreement checkboxes ("I agree")
             consent_selectors = [
                 "input[name*='terms']",
                 "input[name*='consent']",
                 "input[name*='agreement']",
-                "input[type='checkbox'][required]",
-                "label[for*='terms'] input[type='checkbox']",
-                "[data-testid*='terms'] input[type='checkbox']",
+                "input[type='checkbox']",
+                "label[for*='terms']",
+                "label[for*='agree']",
+                "[data-testid*='terms']",
+                "[data-testid*='agree']",
             ]
             for sel in consent_selectors:
                 try:
                     checkboxes = await page.query_selector_all(sel)
                     for cb in checkboxes:
-                        if await cb.is_visible() and not await cb.is_checked():
-                            await cb.check()
+                        if await cb.is_visible():
+                            if cb.tag_name == "LABEL":
+                                await cb.click()
+                            elif not await cb.is_checked():
+                                await cb.check()
                             await asyncio.sleep(0.3)
                 except Exception:
                     continue

@@ -180,6 +180,45 @@ class Database:
 
     # ── Cleanup ───────────────────────────────────────────────
 
+    async def purge_junk_codes(self, cred_mgr) -> int:
+        """
+        Decrypt every 'retrieved' spotify_code and mark it 'invalid'
+        if it looks like a junk word (pure letters, no digits, known blacklist).
+        Returns the number of codes purged.
+        """
+        JUNK_WORDS = {
+            "permission", "undefined", "cookie", "accept", "submit", "button", "none", "trial",
+            "subscribe", "standard", "membership", "overview", "benefit", "voucher", "account",
+            "settings", "profile", "details", "password", "continue", "register", "redeem",
+            "cancel", "login", "signup", "logout", "privacy", "terms", "help", "support",
+            "home", "index", "about", "contact", "error", "page", "month", "months",
+        }
+        cursor = await self._db.execute(
+            "SELECT id, code_encrypted FROM spotify_codes WHERE status = 'retrieved'"
+        )
+        rows = await cursor.fetchall()
+        purged = 0
+        for row in rows:
+            try:
+                code = cred_mgr.decrypt(row["code_encrypted"])
+                c = code.strip().lower()
+                is_junk = (
+                    c in JUNK_WORDS
+                    or (c.isalpha() and len(c) <= 30)  # pure letters = not a real code
+                )
+                if is_junk:
+                    await self._db.execute(
+                        "UPDATE spotify_codes SET status = 'invalid' WHERE id = ?",
+                        (row["id"],),
+                    )
+                    purged += 1
+                    logger.info(f"Purged junk code id={row['id']}: '{code}'")
+            except Exception as e:
+                logger.warning(f"Could not check code id={row['id']}: {e}")
+        if purged:
+            await self._db.commit()
+        return purged
+
     async def clear_all_data(self):
         await self._db.executescript("""
             DELETE FROM sessions;

@@ -412,17 +412,8 @@ async def redeem_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
 
         if sp_session or (context.user_data.get("rd_email") and context.user_data.get("rd_password")):
-            acc_note = ""
-            if not sp_session and context.user_data.get("rd_email"):
-                acc_note = f"\n👤 Using saved Spotify account: `{mask_email(context.user_data['rd_email'])}`"
-            await query.edit_message_text(
-                f"🎁 *Redeem Spotify Code*\n\n"
-                f"🎟️ Code / Link: `{code}`{acc_note}\n\n"
-                f"Redeem this code now?",
-                parse_mode="Markdown",
-                reply_markup=get_confirm_keyboard(),
-            )
-            return RD_CONFIRM
+            # Directly process redemption without asking confirmation
+            return await rd_process(update, context)
         else:
             await query.edit_message_text(
                 f"🎁 *Redeem Spotify Code*\n\n"
