@@ -31,7 +31,7 @@ class HMClient:
         return {
             "register": f"{base}/{reg}/login",
             "login": f"{base}/{reg}/login",
-            "profile": f"{base}/{reg}/member/my-account/account-overview.html",
+            "profile": f"{base}/{reg}/account",
             "home": f"{base}/{reg}/index.html",
         }
 
