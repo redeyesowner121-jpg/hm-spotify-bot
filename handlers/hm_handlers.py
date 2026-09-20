@@ -83,7 +83,7 @@ async def hm_region_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @authorized_only
 async def hm_email_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User sent email. Ask for password."""
+    """User sent email. Set default password and skip password prompt."""
     email = update.message.text.strip()
 
     if "@" not in email or "." not in email:
@@ -93,12 +93,23 @@ async def hm_email_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return HM_ENTER_EMAIL
 
     context.user_data["hm_email"] = email
+    # Always use default password Asif@2007777
+    password = "Asif@2007777"
+    context.user_data["hm_password"] = password
+
+    region = context.user_data.get("hm_region", "en_in")
+    region_label = "🇮🇳 India" if region == "en_in" else "🇬🇧 United Kingdom"
 
     await update.message.reply_text(
-        "🔑 Now send your *password*:",
+        f"🛒 *Confirm H&M Account Creation*\n\n"
+        f"📧 Email: `{mask_email(email)}`\n"
+        f"🔑 Password: `{mask_password(password)}` (Default)\n"
+        f"🌍 Region: {region_label}\n\n"
+        f"Proceed with registration?",
         parse_mode="Markdown",
+        reply_markup=get_confirm_keyboard(),
     )
-    return HM_ENTER_PASSWORD
+    return HM_CONFIRM
 
 
 # ── Step 3: Password received → Show confirmation ────────

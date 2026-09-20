@@ -52,12 +52,16 @@ class HMClient:
         page = None
 
         try:
-            await progress_cb("🌐 Opening H&M home page...")
+            await progress_cb("🌐 Opening H&M registration page...")
             context = await self.browser.get_context("hm")
             page = await context.new_page()
 
-            # Navigate to home page first
-            await page.goto(urls["home"], wait_until="domcontentloaded", timeout=30000)
+            # Navigate directly to register page or signin page
+            try:
+                await page.goto(urls["register"], wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                await page.goto(urls["login"], wait_until="domcontentloaded", timeout=30000)
+
             await asyncio.sleep(3)
 
             # Accept cookies if the popup appears (often blocks profile button)
