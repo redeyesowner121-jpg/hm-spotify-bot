@@ -57,58 +57,27 @@ class HMClient:
             context = await self.browser.get_context("hm")
             page = await context.new_page()
 
-            # Navigate directly to register page or signin page
-            try:
-                await page.goto(urls["register"], wait_until="domcontentloaded", timeout=30000)
-            except Exception:
-                await page.goto(urls["login"], wait_until="domcontentloaded", timeout=30000)
-
+            await page.goto(urls["login"], wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(3)
 
-            # Accept cookies if the popup appears (often blocks profile button)
-            try:
-                cookie_btn = await page.query_selector("button#onetrust-accept-btn-handler")
-                if cookie_btn and await cookie_btn.is_visible():
-                    await cookie_btn.click()
-                    await asyncio.sleep(1)
-            except Exception:
-                pass
-
-            # Click profile/sign-in button in top right or navigate to signin URL directly if needed
-            await progress_cb("👤 Accessing profile/sign-in menu...")
-            profile_selectors = [
-                "button[data-testid='myAccount']",
-                "a[data-testid='myAccount']",
-                ".menu__myhm",
-                "a[href*='signin']",
-                "a[href*='login']",
-                ".account-link",
-                "button:has-text('Sign in')",
-                "a:has-text('Sign in')",
-                "button:has-text('My Account')",
-                "a:has-text('My Account')"
-            ]
-            clicked_profile = False
-            for sel in profile_selectors:
+            # 1. Dismiss OneTrust cookie banner (covers the screen)
+            for c_sel in [
+                "button#onetrust-accept-btn-handler",
+                "button:has-text('Alle Cookies akzeptieren')",
+                "button:has-text('Akzeptieren')",
+                "button:has-text('Accept all cookies')",
+                "button:has-text('Accept')",
+            ]:
                 try:
-                    el = await page.query_selector(sel)
-                    if el and await el.is_visible():
-                        await el.click()
-                        clicked_profile = True
+                    c_btn = await page.query_selector(c_sel)
+                    if c_btn and await c_btn.is_visible():
+                        await c_btn.click()
+                        await asyncio.sleep(1)
                         break
-                except Exception:
-                    continue
-
-            if not clicked_profile:
-                # Direct navigation fallback to signin URL
-                try:
-                    await page.goto(urls["login"], wait_until="domcontentloaded", timeout=20000)
                 except Exception:
                     pass
 
-            await asyncio.sleep(4)
-
-            # Check for CAPTCHA
+            # 2. Check for CAPTCHA
             if await self.browser.detect_captcha(page):
                 await progress_cb(
                     "🛡️ CAPTCHA detected!\n\n"
@@ -120,67 +89,105 @@ class HMClient:
 
             await progress_cb("📝 Entering details to initiate registration...")
 
-            # If there is a tab for "Register" / "Become a member" / "Create account", click it
-            for reg_tab_sel in [
-                "button:has-text('Register')",
-                "button:has-text('Become a member')",
-                "button:has-text('Create account')",
-                "a:has-text('Register')",
-                "a:has-text('Become a member')",
-                "[data-testid*='register']",
-            ]:
-                try:
-                    rtab = await page.query_selector(reg_tab_sel)
-                    if rtab and await rtab.is_visible():
-                        await rtab.click()
-                        await asyncio.sleep(2)
-                        break
-                except Exception:
-                    continue
-
-            # Try multiple selector strategies for the email field
+            # 3. Locate email field - wait for it to be visible in the modal
             email_selectors = [
-                "input[name='email']",
                 "input[type='email']",
-                "#email",
+                "input[name='email']",
+                "input#email",
                 "input[id*='email' i]",
-                "input[data-testid='email-input']",
+                "input[data-testid*='email' i]",
                 "input[placeholder*='email' i]",
+                "input[placeholder*='e-mail' i]",
+                "input[aria-label*='email' i]",
+                "input[aria-label*='e-mail' i]",
             ]
-            email_filled = False
+
+            email_el = None
             for sel in email_selectors:
                 try:
-                    el = await page.query_selector(sel)
-                    if el and await el.is_visible():
-                        await el.click()
-                        await el.fill(email)
-                        email_filled = True
+                    el = await page.wait_for_selector(sel, state="visible", timeout=4000)
+                    if el:
+                        email_el = el
                         break
                 except Exception:
                     continue
 
-            if not email_filled:
+            # If modal didn't open automatically on /login, click the profile/account icon in header
+            if not email_el:
+                await progress_cb("👤 Opening sign-in modal...")
+                for psel in [
+                    "button[data-testid='myAccount']",
+                    "a[data-testid='myAccount']",
+                    ".menu__myhm",
+                    "button:has-text('Sign in')",
+                    "button:has-text('Anmelden')",
+                    "a:has-text('Sign in')",
+                    "a:has-text('Anmelden')",
+                ]:
+                    try:
+                        pbtn = await page.query_selector(psel)
+                        if pbtn and await pbtn.is_visible():
+                            await pbtn.click()
+                            await asyncio.sleep(2)
+                            break
+                    except Exception:
+                        continue
+
+                # Now wait for email input
+                for sel in email_selectors:
+                    try:
+                        el = await page.wait_for_selector(sel, state="visible", timeout=6000)
+                        if el:
+                            email_el = el
+                            break
+                    except Exception:
+                        continue
+
+            # Fallback: inspect all visible input elements
+            if not email_el:
+                all_inputs = await page.query_selector_all("input")
+                for inp in all_inputs:
+                    if await inp.is_visible():
+                        itype = (await inp.get_attribute("type") or "").lower()
+                        iname = (await inp.get_attribute("name") or "").lower()
+                        ipl = (await inp.get_attribute("placeholder") or "").lower()
+                        if "email" in iname or "email" in itype or "email" in ipl or "e-mail" in ipl:
+                            email_el = inp
+                            break
+
+            if not email_el:
                 return {
                     "success": False,
                     "message": "Could not find email field on registration page",
                     "details": "H&M may have updated their website layout. Please register manually.",
                 }
 
-            # Click CONTINUE button after filling email (H&M 2-step sign in / sign up modal)
+            # 4. Fill email
+            await email_el.click()
+            await email_el.fill("")
+            await email_el.fill(email)
+            await asyncio.sleep(1)
+
+            # 5. Click CONTINUE / WEITER button (H&M 2-step sign in / sign up modal)
             for cont_sel in [
                 "button:has-text('CONTINUE')",
                 "button:has-text('Continue')",
+                "button:has-text('WEITER')",
+                "button:has-text('Weiter')",
+                "button:has-text('Fortfahren')",
                 "button[type='submit']",
                 "button[data-testid*='submit']",
+                "button[data-testid*='continue']",
             ]:
                 try:
                     cbtn = await page.query_selector(cont_sel)
                     if cbtn and await cbtn.is_visible():
                         await cbtn.click()
-                        await asyncio.sleep(3)
                         break
                 except Exception:
                     continue
+
+            await asyncio.sleep(3)
 
             # Check for CAPTCHA after clicking Continue
             if await self.browser.detect_captcha(page):
@@ -189,63 +196,91 @@ class HMClient:
                 if not resolved:
                     return {"success": False, "message": "CAPTCHA resolution timed out"}
 
-            # Fill password field (appears after clicking Continue)
+            # 6. Wait for password field to appear
+            password_el = None
             password_selectors = [
-                "input[name='password']",
                 "input[type='password']",
-                "#password",
+                "input[name='password']",
+                "input#password",
                 "input[id*='password' i]",
-                "input[data-testid='password-input']",
+                "input[data-testid*='password' i]",
             ]
-            password_filled = False
-            for sel in password_selectors:
+            for psel in password_selectors:
                 try:
-                    el = await page.query_selector(sel)
-                    if el and await el.is_visible():
-                        await el.click()
-                        await el.fill(password)
-                        password_filled = True
+                    el = await page.wait_for_selector(psel, state="visible", timeout=8000)
+                    if el:
+                        password_el = el
                         break
                 except Exception:
                     continue
 
-            # Fill extra fields: First Name & Date of Birth if requested/present
-            # 1. First Name / Name
-            name_selectors = [
+            if password_el:
+                await password_el.click()
+                await password_el.fill("")
+                await password_el.fill(password)
+                await asyncio.sleep(0.5)
+
+            # 7. Fill registration extra fields: First Name & Date of Birth
+            first_name = email.split("@")[0]
+            for nsel in [
                 "input[name='firstName']",
                 "input[name='first_name']",
                 "input[name='name']",
                 "input[id*='firstName' i]",
                 "input[placeholder*='First Name' i]",
+                "input[placeholder*='Vorname' i]",
                 "input[placeholder*='Name' i]",
-            ]
-            first_name = email.split("@")[0]
-            for sel in name_selectors:
+            ]:
                 try:
-                    el = await page.query_selector(sel)
-                    if el and await el.is_visible():
-                        await el.click()
-                        await el.fill(first_name)
+                    nel = await page.query_selector(nsel)
+                    if nel and await nel.is_visible():
+                        await nel.click()
+                        await nel.fill(first_name)
                         break
                 except Exception:
                     continue
 
-            # 2. Date of Birth (e.g. DD/MM/YYYY or separate fields or input[type='date'])
-            dob_selectors = [
+            # Date of Birth
+            for dsel in [
                 "input[name='dateOfBirth']",
                 "input[name='dob']",
                 "input[name='birthdate']",
                 "input[id*='dob' i]",
                 "input[placeholder*='DD/MM/YYYY' i]",
+                "input[placeholder*='TT/MM/JJJJ' i]",
                 "input[placeholder*='YYYY-MM-DD' i]",
-            ]
-            for sel in dob_selectors:
+            ]:
                 try:
-                    el = await page.query_selector(sel)
-                    if el and await el.is_visible():
-                        await el.click()
-                        await el.fill("01/01/1998")
+                    del_el = await page.query_selector(dsel)
+                    if del_el and await del_el.is_visible():
+                        await del_el.click()
+                        await del_el.fill("01/01/1998")
                         break
+                except Exception:
+                    continue
+
+            # Consent / Agreement checkboxes ("I agree" / "Ich stimme zu")
+            for cbsel in [
+                "input[type='checkbox']",
+                "label[for*='terms']",
+                "label[for*='agree']",
+                "label[for*='agb']",
+                "label[for*='datenschutz']",
+                "[data-testid*='terms']",
+                "[data-testid*='agree']",
+            ]:
+                try:
+                    checkboxes = await page.query_selector_all(cbsel)
+                    for cb in checkboxes:
+                        if await cb.is_visible():
+                            tag = await cb.evaluate("el => el.tagName")
+                            if tag == "LABEL":
+                                await cb.click()
+                            else:
+                                is_chk = await cb.is_checked()
+                                if not is_chk:
+                                    await cb.check()
+                            await asyncio.sleep(0.2)
                 except Exception:
                     continue
 
@@ -598,33 +633,41 @@ class HMClient:
             await asyncio.sleep(2)
 
             # Dismiss cookie banner if it exists
-            try:
-                cookie_btn = await page.query_selector("button#onetrust-accept-btn-handler")
-                if cookie_btn and await cookie_btn.is_visible():
-                    await cookie_btn.click()
-                    await asyncio.sleep(1)
-            except Exception:
-                pass
+            for c_sel in [
+                "button#onetrust-accept-btn-handler",
+                "button:has-text('Alle Cookies akzeptieren')",
+                "button:has-text('Akzeptieren')",
+                "button:has-text('Accept all cookies')",
+                "button:has-text('Accept')",
+            ]:
+                try:
+                    cookie_btn = await page.query_selector(c_sel)
+                    if cookie_btn and await cookie_btn.is_visible():
+                        await cookie_btn.click()
+                        await asyncio.sleep(1)
+                        break
+                except Exception:
+                    pass
 
-            # Scroll down to ensure lazy-loaded offers appear
-            await page.evaluate("window.scrollBy(0, 500)")
-            await asyncio.sleep(2)
+            # Scroll down the page in increments to trigger lazy-loaded sections
+            for scroll_pos in [400, 900, 1500, 2200, 3000]:
+                await page.evaluate(f"window.scrollTo(0, {scroll_pos})")
+                await asyncio.sleep(0.8)
 
-            # Search specifically for the offer text described by user:
-            # "Free 2-month trial | Spotify Premium Standard offer" or "Free 3-month trial | Spotify Premium Standard offer"
+            # Search for any Spotify offer element
             spotify_offer_selectors = [
-                "text=/Free [23]-month trial.*Spotify/i",
-                "text=/Spotify Premium Standard offer/i",
-                "text=/Spotify Premium/i",
-                "[data-testid*='offer']:has-text('Spotify')",
-                "[class*='offer']:has-text('Spotify')",
-                "[class*='reward']:has-text('Spotify')",
+                "text=/Spotify/i",
                 "a:has-text('Spotify')",
                 "button:has-text('Spotify')",
                 "div:has-text('Spotify Premium')",
+                "div:has-text('Spotify')",
+                "h2:has-text('Spotify')",
                 "h3:has-text('Spotify')",
                 "h4:has-text('Spotify')",
                 "p:has-text('Spotify')",
+                "[data-testid*='spotify' i]",
+                "[class*='offer']:has-text('Spotify')",
+                "[class*='reward']:has-text('Spotify')",
             ]
 
             spotify_element = None
@@ -637,10 +680,21 @@ class HMClient:
                 except Exception:
                     continue
 
-            # If not found on initial screen, check for an "Offers", "My Offers", or "Rewards" tab
+            # If not found on initial screen, check for German and English tabs
             if not spotify_element:
-                await progress_cb("📑 Checking 'Offers & Rewards' section...")
+                await progress_cb("📑 Checking 'Offers & Rewards' (Angebote) section...")
                 tab_selectors = [
+                    # German offers/rewards
+                    "a[href*='angebote']",
+                    "a[href*='vorteile']",
+                    "a[href*='gutscheine']",
+                    "a[href*='rewards']",
+                    "a:has-text('Angebote')",
+                    "a:has-text('Vorteile')",
+                    "a:has-text('Meine Angebote')",
+                    "button:has-text('Angebote')",
+                    "button:has-text('Vorteile')",
+                    # English
                     "a[href*='offers']",
                     "a[href*='rewards']",
                     "button:has-text('Offers')",
@@ -656,6 +710,9 @@ class HMClient:
                         if tab_el and await tab_el.is_visible():
                             await tab_el.click()
                             await asyncio.sleep(3)
+                            for scroll_pos in [400, 1000, 1800]:
+                                await page.evaluate(f"window.scrollTo(0, {scroll_pos})")
+                                await asyncio.sleep(0.5)
                             break
                     except Exception:
                         continue
@@ -670,16 +727,89 @@ class HMClient:
                     except Exception:
                         continue
 
+            # If still not found, search for "Spotify" using the site search
+            if not spotify_element:
+                await progress_cb("🔍 Searching for 'Spotify' on H&M...")
+                search_input = None
+                for ssel in [
+                    "input[type='search']",
+                    "input[name='q']",
+                    "input[placeholder*='suchen' i]",
+                    "input[placeholder*='search' i]",
+                    "input#search",
+                ]:
+                    try:
+                        si = await page.query_selector(ssel)
+                        if si and await si.is_visible():
+                            search_input = si
+                            break
+                    except Exception:
+                        continue
+
+                if not search_input:
+                    for sbtn_sel in [
+                        "button[data-testid*='search']",
+                        "button[aria-label*='search' i]",
+                        "button[aria-label*='suchen' i]",
+                        "a[aria-label*='search' i]",
+                        "a[aria-label*='suchen' i]",
+                        "button:has-text('Suchen')",
+                        "button:has-text('Search')",
+                    ]:
+                        try:
+                            sbtn = await page.query_selector(sbtn_sel)
+                            if sbtn and await sbtn.is_visible():
+                                await sbtn.click()
+                                await asyncio.sleep(1)
+                                break
+                        except Exception:
+                            continue
+
+                    for ssel in [
+                        "input[type='search']",
+                        "input[name='q']",
+                        "input[placeholder*='suchen' i]",
+                        "input[placeholder*='search' i]",
+                        "input#search",
+                    ]:
+                        try:
+                            si = await page.query_selector(ssel)
+                            if si and await si.is_visible():
+                                search_input = si
+                                break
+                        except Exception:
+                            continue
+
+                if search_input:
+                    try:
+                        await search_input.click()
+                        await search_input.fill("Spotify")
+                        await page.keyboard.press("Enter")
+                        await asyncio.sleep(4)
+                        for scroll_pos in [400, 1000, 1800]:
+                            await page.evaluate(f"window.scrollTo(0, {scroll_pos})")
+                            await asyncio.sleep(0.5)
+
+                        for sel in spotify_offer_selectors:
+                            try:
+                                el = await page.query_selector(sel)
+                                if el and await el.is_visible():
+                                    spotify_element = el
+                                    break
+                            except Exception:
+                                continue
+                    except Exception as se:
+                        logger.warning(f"Search for Spotify error: {se}")
+
             if not spotify_element:
                 await self.browser.save_session("hm", context)
                 await self.db.log_operation("get_spotify_code", "not_found", "Offer not found on profile")
                 return {
                     "success": False,
-                    "message": "ℹ️ 'Spotify Premium Standard offer' not found on your profile",
+                    "message": "ℹ️ 'Spotify Premium offer' not found on your profile",
                     "details": (
-                        "We searched for:\n"
-                        "• Free 2-month trial | Spotify Premium Standard offer\n"
-                        "• Free 3-month trial | Spotify Premium Standard offer\n\n"
+                        "We searched for Spotify offers across your account overview, "
+                        "rewards tabs, and search results.\n\n"
                         "Please verify your H&M account has active Spotify membership benefits."
                     ),
                 }
@@ -707,18 +837,23 @@ class HMClient:
                 pass
             await asyncio.sleep(2)
 
-            # Look for Redeem button
+            # Look for Redeem button (English & German)
             redeem_selectors = [
                 "button:has-text('Redeem')",
                 "a:has-text('Redeem')",
+                "button:has-text('Einlösen')",
+                "a:has-text('Einlösen')",
                 "button:has-text('Claim')",
                 "a:has-text('Claim')",
-                "[data-testid*='redeem']",
-                "[data-testid*='claim']",
                 "button:has-text('Get code')",
-                "a:has-text('Get code')",
+                "button:has-text('Code anfordern')",
+                "button:has-text('Zum Angebot')",
+                "a:has-text('Zum Angebot')",
                 "button:has-text('Go to offer')",
                 "a:has-text('Go to offer')",
+                "[data-testid*='redeem']",
+                "[data-testid*='claim']",
+                "[data-testid*='einloesen']",
             ]
 
             redeem_btn = None
