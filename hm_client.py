@@ -165,7 +165,30 @@ class HMClient:
                     "details": "H&M may have updated their website layout. Please register manually.",
                 }
 
-            # Fill password field
+            # Click CONTINUE button after filling email (H&M 2-step sign in / sign up modal)
+            for cont_sel in [
+                "button:has-text('CONTINUE')",
+                "button:has-text('Continue')",
+                "button[type='submit']",
+                "button[data-testid*='submit']",
+            ]:
+                try:
+                    cbtn = await page.query_selector(cont_sel)
+                    if cbtn and await cbtn.is_visible():
+                        await cbtn.click()
+                        await asyncio.sleep(3)
+                        break
+                except Exception:
+                    continue
+
+            # Check for CAPTCHA after clicking Continue
+            if await self.browser.detect_captcha(page):
+                await progress_cb("🛡️ CAPTCHA detected! Please complete manually. Waiting...")
+                resolved = await self.browser.wait_for_captcha_resolution(page)
+                if not resolved:
+                    return {"success": False, "message": "CAPTCHA resolution timed out"}
+
+            # Fill password field (appears after clicking Continue)
             password_selectors = [
                 "input[name='password']",
                 "input[type='password']",
@@ -441,11 +464,27 @@ class HMClient:
             await progress_cb("🔑 Entering credentials...")
 
             # Fill email
-            for sel in ["input[name='email']", "input[type='email']", "#email", "input[name='username']"]:
+            for sel in ["input[name='email']", "input[type='email']", "#email", "input[name='username']", "input[placeholder*='email' i]"]:
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
                         await el.fill(email)
+                        break
+                except Exception:
+                    continue
+
+            # Click CONTINUE button if present (H&M 2-step login modal)
+            for cont_sel in [
+                "button:has-text('CONTINUE')",
+                "button:has-text('Continue')",
+                "button[type='submit']",
+                "button[data-testid*='submit']",
+            ]:
+                try:
+                    cbtn = await page.query_selector(cont_sel)
+                    if cbtn and await cbtn.is_visible():
+                        await cbtn.click()
+                        await asyncio.sleep(2)
                         break
                 except Exception:
                     continue
