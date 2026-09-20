@@ -379,6 +379,13 @@ async def redeem_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code_record = await db.get_latest_spotify_code()
     if code_record:
         code = cred.decrypt(code_record["code_encrypted"])
+        # Invalidate junk words like 'permission' that were scraped accidentally
+        JUNK_CODES = {"permission", "undefined", "cookie", "accept", "submit", "button", "none", "trial"}
+        if code.lower().strip() in JUNK_CODES:
+            await db.update_spotify_code_status(code_record["id"], "invalid")
+            code_record = None
+
+    if code_record:
         context.user_data["rd_code"] = code
         context.user_data["rd_code_id"] = code_record["id"]
 

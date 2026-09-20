@@ -632,45 +632,64 @@ class HMClient:
 
             redeem_url = None
             extracted_code = None
+            captured_spotify_urls = []
+
+            # Listen to all network requests to catch Spotify redirect URLs
+            def on_request(req):
+                if "spotify.com" in req.url.lower():
+                    captured_spotify_urls.append(req.url)
+
+            page.on("request", on_request)
 
             if redeem_btn:
                 await progress_cb("🎁 Found Redeem button! Clicking to get redeem link...")
                 await redeem_btn.scroll_into_view_if_needed()
 
-                # Check if it has a direct href
-                direct_href = await redeem_btn.get_attribute("href")
-                if direct_href and ("spotify" in direct_href or "http" in direct_href):
-                    redeem_url = direct_href
+                # Check direct href or data attributes on button
+                for attr in ["href", "data-href", "data-url", "data-link"]:
+                    val = await redeem_btn.get_attribute(attr)
+                    if val and ("spotify" in val or "http" in val):
+                        redeem_url = val
+                        break
 
                 # Click and catch navigation or new tab
                 try:
-                    async with context.expect_page(timeout=8000) as page_info:
+                    async with context.expect_page(timeout=10000) as page_info:
                         await redeem_btn.click()
                     new_tab = await page_info.value
                     await new_tab.wait_for_load_state("domcontentloaded", timeout=15000)
                     await asyncio.sleep(3)
-                    redeem_url = new_tab.url
+                    if "spotify" in new_tab.url.lower():
+                        redeem_url = new_tab.url
                 except Exception:
                     # Same tab navigation or redirect
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(5)
                     if "spotify" in page.url.lower():
                         redeem_url = page.url
 
-            # Fallback check all open tabs in browser context
+            # Fallback 1: check all open tabs in browser context
             if not redeem_url or "hm.com" in redeem_url:
                 for p in context.pages:
-                    if "spotify" in p.url.lower():
+                    if "spotify.com" in p.url.lower():
                         redeem_url = p.url
                         break
 
-            # If still on H&M page, scan content for any Spotify redeem URL
-            import re
-            page_content = await page.content()
-            url_match = re.search(r'https?://[^\s"\'<>]+spotify\.com[^\s"\'<>]*', page_content)
-            if url_match and not redeem_url:
-                redeem_url = url_match.group(0)
+            # Fallback 2: check captured network requests
+            if not redeem_url and captured_spotify_urls:
+                for u in reversed(captured_spotify_urls):
+                    if any(x in u.lower() for x in ["redeem", "claim", "purchase", "spotify.com"]):
+                        redeem_url = u
+                        break
 
-            # Try to extract code from redeem_url
+            # Fallback 3: scan HTML content for any Spotify URL
+            if not redeem_url:
+                import re
+                page_content = await page.content()
+                url_match = re.search(r'https?://[^\s"\'<>]+spotify\.com[^\s"\'<>]*', page_content)
+                if url_match:
+                    redeem_url = url_match.group(0)
+
+            # Extract code if present inside the redeem_url (e.g. ?code=XYZ or /claim/XYZ)
             if redeem_url:
                 code_match = re.search(r'(?:code|voucher|token|coupon)=([A-Za-z0-9_-]+)', redeem_url, re.IGNORECASE)
                 if not code_match:
@@ -678,22 +697,25 @@ class HMClient:
                 if code_match:
                     extracted_code = code_match.group(1)
 
-            # If still no extracted code, search page text
-            if not extracted_code:
-                page_text = await page.inner_text("body")
-                for cp in [r'(?:code|voucher|redeem|coupon)[:\s]*([A-Z0-9]{8,30})', r'([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})']:
-                    cm = re.search(cp, page_text, re.IGNORECASE)
-                    if cm:
-                        extracted_code = cm.group(1)
-                        break
+            # Blacklist of junk words that must NEVER be treated as a code
+            JUNK_WORDS = {
+                "permission", "subscribe", "standard", "undefined", "membership",
+                "overview", "benefit", "voucher", "account", "settings", "profile",
+                "details", "password", "continue", "register", "redeem", "cancel",
+                "cookie", "accept", "submit", "button", "trial", "month", "months"
+            }
+            if extracted_code and extracted_code.lower().strip() in JUNK_WORDS:
+                extracted_code = None
+
+            # Always prioritize the full redeem_url!
+            code_to_save = redeem_url or extracted_code
 
             # If we got a redeem_url or code:
-            if redeem_url or extracted_code:
-                code_to_save = extracted_code or redeem_url
+            if code_to_save:
                 code_enc = self.cred.encrypt(code_to_save)
                 await self.db.save_spotify_code(code_enc)
                 await self.browser.save_session("hm", context)
-                await self.db.log_operation("get_spotify_code", "success", redeem_url or extracted_code)
+                await self.db.log_operation("get_spotify_code", "success", code_to_save)
 
                 return {
                     "success": True,

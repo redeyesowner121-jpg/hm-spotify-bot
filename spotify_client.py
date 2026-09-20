@@ -327,6 +327,15 @@ class SpotifyClient:
             await page.goto(SPOTIFY_URLS["login"], wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(2)
 
+            # Dismiss cookie banner if present
+            try:
+                cookie_btn = await page.query_selector("button#onetrust-accept-btn-handler, button:has-text('Accept Cookies')")
+                if cookie_btn and await cookie_btn.is_visible():
+                    await cookie_btn.click()
+                    await asyncio.sleep(1)
+            except Exception:
+                pass
+
             if await self.browser.detect_captcha(page):
                 await progress_cb("🛡️ CAPTCHA detected! Please complete manually. Waiting...")
                 resolved = await self.browser.wait_for_captcha_resolution(page)
@@ -336,7 +345,7 @@ class SpotifyClient:
             await progress_cb("🔑 Entering Spotify credentials...")
 
             # Fill email/username
-            for sel in ["input[name='username']", "input[id='login-username']", "input[type='email']", "input[type='text']"]:
+            for sel in ["input[id='login-username']", "input[name='username']", "input[type='email']", "input[type='text']"]:
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
@@ -346,7 +355,7 @@ class SpotifyClient:
                     continue
 
             # Fill password
-            for sel in ["input[name='password']", "input[id='login-password']", "input[type='password']"]:
+            for sel in ["input[id='login-password']", "input[name='password']", "input[type='password']"]:
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
@@ -356,14 +365,29 @@ class SpotifyClient:
                     continue
 
             # Submit
-            for sel in ["button[id='login-button']", "button[type='submit']", "button:has-text('Log in')", "button:has-text('Sign in')"]:
+            submitted = False
+            for sel in ["button[data-testid='login-button']", "button[id='login-button']", "button[type='submit']", "button:has-text('Log in')", "button:has-text('Sign in')"]:
                 try:
                     btn = await page.query_selector(sel)
                     if btn and await btn.is_visible():
                         await btn.click()
+                        submitted = True
                         break
                 except Exception:
                     continue
+
+            if not submitted:
+                try:
+                    await page.keyboard.press("Enter")
+                    submitted = True
+                except Exception:
+                    pass
+
+            # Wait for navigation away from /login
+            try:
+                await page.wait_for_url(lambda u: "/login" not in u.lower(), timeout=12000)
+            except Exception:
+                pass
 
             await asyncio.sleep(3)
 
@@ -383,13 +407,25 @@ class SpotifyClient:
                     "Please complete the verification manually.\n"
                     "Waiting up to 5 minutes..."
                 )
-                # Wait for URL to change (user completes verification)
                 try:
                     await page.wait_for_url("**/account/**", timeout=300000)
                 except Exception:
                     return {"success": False, "message": "2FA/verification timed out"}
 
-            if any(x in current_url for x in ["account", "player", "home", "open.spotify"]):
+            # Check for incorrect credentials
+            if any(x in page_content.lower() for x in ["incorrect", "wrong password", "invalid username", "doesn't match"]):
+                return {
+                    "success": False,
+                    "message": "❌ Spotify login failed — incorrect credentials",
+                    "details": "Check your email and password.",
+                }
+
+            # Check if login authenticated successfully (via auth cookies or navigation away from login)
+            cookies = await context.cookies()
+            auth_cookie_names = {"sp_dc", "sp_t", "sp_key", "sp_m"}
+            has_auth_cookie = any(c.get("name") in auth_cookie_names for c in cookies)
+
+            if ("/login" not in current_url) or has_auth_cookie or any(x in current_url for x in ["account", "player", "home", "open.spotify"]):
                 await self.browser.save_session("spotify", context)
                 email_enc = self.cred.encrypt(email)
                 pass_enc = self.cred.encrypt(password)
@@ -401,17 +437,11 @@ class SpotifyClient:
                     "email": email,
                 }
 
-            if any(x in page_content.lower() for x in ["incorrect", "wrong", "invalid", "doesn't match"]):
-                return {
-                    "success": False,
-                    "message": "❌ Spotify login failed — incorrect credentials",
-                    "details": "Check your email and password.",
-                }
-
-            await self.browser.save_session("spotify", context)
+            # Still stuck on login page
             return {
-                "success": True,
-                "message": "⚠️ Login submitted — please verify status",
+                "success": False,
+                "message": "❌ Spotify login failed — still on login page",
+                "details": "Please check your email and password, or check if Spotify prompted a verification challenge.",
             }
 
         except Exception as e:
@@ -431,19 +461,20 @@ class SpotifyClient:
         progress_cb: ProgressCallback,
     ) -> dict:
         """
-        Redeem a voucher/promo code on Spotify's official redeem page.
+        Redeem a voucher/promo code or full promo URL on Spotify.
         Requires an active Spotify session.
         """
         context = None
         page = None
 
         try:
-            await progress_cb("🌐 Opening Spotify redeem page...")
+            target_url = code if code.startswith("http") else SPOTIFY_URLS["redeem"]
+            await progress_cb(f"🌐 Opening Spotify redeem page...")
             context = await self.browser.get_context("spotify")
             page = await context.new_page()
 
-            await page.goto(SPOTIFY_URLS["redeem"], wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(2)
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(3)
 
             # Check if redirected to login
             if "login" in page.url.lower() or "signin" in page.url.lower():
@@ -459,28 +490,38 @@ class SpotifyClient:
                 if not resolved:
                     return {"success": False, "message": "CAPTCHA resolution timed out"}
 
-            await progress_cb(f"🎁 Entering redeem code...")
-
-            # Find and fill the code input
-            code_selectors = [
-                "input[name='code']",
-                "input[name='pin']",
-                "input[type='text']",
-                "input[placeholder*='code' i]",
-                "input[placeholder*='pin' i]",
-                "input[data-testid*='code']",
-                "#code",
+            # If the target was a promo URL, a button like 'Confirm' or 'Claim' might be directly clickable
+            promo_action_selectors = [
+                "button:has-text('Redeem')",
+                "button:has-text('Claim')",
+                "button:has-text('Get offer')",
+                "button:has-text('Continue')",
+                "button:has-text('Confirm')",
+                "button[data-testid*='redeem']",
             ]
+
             code_entered = False
-            for sel in code_selectors:
-                try:
-                    el = await page.query_selector(sel)
-                    if el and await el.is_visible():
-                        await el.fill(code)
-                        code_entered = True
-                        break
-                except Exception:
-                    continue
+            # If it's a raw voucher code, fill input
+            if not code.startswith("http"):
+                await progress_cb("🎁 Entering redeem code...")
+                code_selectors = [
+                    "input[name='code']",
+                    "input[name='pin']",
+                    "input[type='text']",
+                    "input[placeholder*='code' i]",
+                    "input[placeholder*='pin' i]",
+                    "input[data-testid*='code']",
+                    "#code",
+                ]
+                for sel in code_selectors:
+                    try:
+                        el = await page.query_selector(sel)
+                        if el and await el.is_visible():
+                            await el.fill(code)
+                            code_entered = True
+                            break
+                    except Exception:
+                        continue
 
             if not code_entered:
                 return {
