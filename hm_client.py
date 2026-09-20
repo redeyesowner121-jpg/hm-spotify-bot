@@ -52,30 +52,54 @@ class HMClient:
         page = None
 
         try:
-            await progress_cb("🌐 Opening H&M registration page...")
+            await progress_cb("🌐 Opening H&M home page...")
             context = await self.browser.get_context("hm")
             page = await context.new_page()
 
-            # Navigate to registration
-            await page.goto(urls["register"], wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(2)
+            # Navigate to home page first
+            await page.goto(urls["home"], wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(3)
 
-            # Check for CAPTCHA before proceeding
+            # Accept cookies if the popup appears (often blocks profile button)
+            try:
+                cookie_btn = await page.query_selector("button#onetrust-accept-btn-handler")
+                if cookie_btn and await cookie_btn.is_visible():
+                    await cookie_btn.click()
+                    await asyncio.sleep(1)
+            except Exception:
+                pass
+
+            # Click profile/sign-in button in top right
+            await progress_cb("👤 Accessing profile/sign-in menu...")
+            profile_selectors = [
+                "button[data-testid='myAccount']",
+                ".menu__myhm",
+                "a[href*='signin']",
+                ".account-link",
+                "button:has-text('Sign in')"
+            ]
+            for sel in profile_selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el and await el.is_visible():
+                        await el.click()
+                        break
+                except Exception:
+                    continue
+            
+            await asyncio.sleep(3)
+
+            # Check for CAPTCHA
             if await self.browser.detect_captcha(page):
                 await progress_cb(
-                    "🛡️ CAPTCHA detected on registration page!\n\n"
-                    "Please complete the CAPTCHA manually in your browser.\n"
-                    "The bot will wait up to 5 minutes..."
+                    "🛡️ CAPTCHA detected!\n\n"
+                    "Please complete it manually. Waiting up to 5 minutes..."
                 )
                 resolved = await self.browser.wait_for_captcha_resolution(page)
                 if not resolved:
-                    return {
-                        "success": False,
-                        "message": "CAPTCHA resolution timed out",
-                        "details": "Please try again later",
-                    }
+                    return {"success": False, "message": "CAPTCHA resolution timed out", "details": "Try again later"}
 
-            await progress_cb("📝 Filling registration form...")
+            await progress_cb("📝 Entering email to initiate registration...")
 
             # Try multiple selector strategies for the email field
             email_selectors = [
@@ -84,7 +108,6 @@ class HMClient:
                 "#email",
                 "input[data-testid='email-input']",
                 "input[placeholder*='email' i]",
-                "input[placeholder*='e-mail' i]",
             ]
             email_filled = False
             for sel in email_selectors:
@@ -97,6 +120,21 @@ class HMClient:
                         break
                 except Exception:
                     continue
+            
+            # Press enter or click continue to trigger the redirect to register page
+            if email_filled:
+                try:
+                    # Often H&M requires clicking a 'Continue' button after entering email
+                    continue_btn = await page.query_selector("button[data-testid='submit-button'], button[type='submit']")
+                    if continue_btn and await continue_btn.is_visible():
+                        await continue_btn.click()
+                    else:
+                        await page.keyboard.press("Enter")
+                except Exception:
+                    await page.keyboard.press("Enter")
+                
+                await asyncio.sleep(4)  # Wait for redirect to actual register page / password field to appear
+
 
             if not email_filled:
                 return {
