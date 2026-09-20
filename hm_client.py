@@ -420,6 +420,9 @@ class HMClient:
             current_url = page.url.lower()
             if any(x in current_url for x in ["my-account", "account-overview", "member"]):
                 await self.browser.save_session("hm", context)
+                email_enc = self.cred.encrypt(email)
+                pass_enc = self.cred.encrypt(password)
+                await self.db.save_account(email_enc, pass_enc, "hm", "active", region)
                 await self.db.log_operation("hm_login", "success", f"Logged in as {email}")
                 return {
                     "success": True,

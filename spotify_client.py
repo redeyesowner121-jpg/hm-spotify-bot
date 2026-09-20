@@ -391,6 +391,9 @@ class SpotifyClient:
 
             if any(x in current_url for x in ["account", "player", "home", "open.spotify"]):
                 await self.browser.save_session("spotify", context)
+                email_enc = self.cred.encrypt(email)
+                pass_enc = self.cred.encrypt(password)
+                await self.db.save_account(email_enc, pass_enc, "spotify", "active")
                 await self.db.log_operation("spotify_login", "success", email)
                 return {
                     "success": True,

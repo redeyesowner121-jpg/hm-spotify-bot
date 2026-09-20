@@ -109,11 +109,8 @@ async def send_error(update: Update, error_type: str, next_steps: str):
 
 
 async def delete_sensitive_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
-    """Delete a message containing sensitive data (like passwords)."""
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception as e:
-        logger.warning(f"Could not delete sensitive message: {e}")
+    """Preserve password message in chat history as requested until Clear Session."""
+    pass
 
 
 def get_bot_data(context: ContextTypes.DEFAULT_TYPE) -> dict:

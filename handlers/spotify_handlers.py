@@ -72,8 +72,7 @@ async def spotify_email_received(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["sp_display_name"] = extract_name_from_email(email)
 
     await update.message.reply_text(
-        "🔑 Now send your *password* for the new Spotify account.\n\n"
-        "⚠️ _Your message will be deleted immediately for security._",
+        "🔑 Now send your *password* for the new Spotify account:",
         parse_mode="Markdown",
     )
     return SP_CREATE_PASSWORD
@@ -81,14 +80,12 @@ async def spotify_email_received(update: Update, context: ContextTypes.DEFAULT_T
 
 @authorized_only
 async def spotify_password_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Password received for Spotify signup. Delete and show confirmation."""
+    """Password received for Spotify signup."""
     password = update.message.text.strip()
-    await delete_sensitive_message(context, update.message.chat_id, update.message.message_id)
 
     if len(password) < 8:
         await update.message.reply_text(
-            "⚠️ Password too short (minimum 8 characters). Try again:\n\n"
-            "⚠️ _Your message will be deleted immediately._",
+            "⚠️ Password too short (minimum 8 characters). Try again:",
             parse_mode="Markdown",
         )
         return SP_CREATE_PASSWORD
@@ -133,7 +130,7 @@ async def spotify_create_confirmed(update: Update, context: ContextTypes.DEFAULT
 
     result = await spotify.create_account(email, password, display_name, progress_cb)
 
-    context.user_data.pop("sp_password", None)
+    # Keep credentials in memory and DB until Clear Session is clicked
 
     if result.get("success"):
         text = (
@@ -173,17 +170,31 @@ async def get_code_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     resources = get_bot_data(context)
     db = resources["db"]
+    cred = resources["cred"]
 
-    # Check if there's an active H&M session
+    # Check if there's an active H&M session or saved account
     session = await db.get_session("hm")
-    if session:
+    if not context.user_data.get("gc_email"):
+        saved_acc = await db.get_account("hm")
+        if saved_acc:
+            try:
+                context.user_data["gc_email"] = cred.decrypt(saved_acc["email_encrypted"])
+                context.user_data["gc_password"] = cred.decrypt(saved_acc["password_encrypted"])
+            except Exception:
+                pass
+
+    acc_info = ""
+    if context.user_data.get("gc_email"):
+        acc_info = f"\n👤 Account: `{mask_email(context.user_data['gc_email'])}`"
+
+    if session or context.user_data.get("gc_email"):
         await query.edit_message_text(
-            "🎶 *Get Spotify Code from H&M*\n\n"
-            "✅ H&M session found. Select your region:",
+            f"🎶 *Get Spotify Code from H&M*{acc_info}\n\n"
+            f"Select your H&M region:",
             parse_mode="Markdown",
             reply_markup=get_region_keyboard(),
         )
-        context.user_data["gc_has_session"] = True
+        context.user_data["gc_has_session"] = bool(session)
     else:
         await query.edit_message_text(
             "🎶 *Get Spotify Code from H&M*\n\n"
@@ -206,10 +217,10 @@ async def gc_region_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["gc_region"] = "en_in" if query.data == CB_REGION_IN else "en_gb"
 
     if context.user_data.get("gc_has_session"):
-        # Skip login, go straight to retrieval
         return await gc_process(update, context)
+    elif context.user_data.get("gc_email") and context.user_data.get("gc_password"):
+        return await gc_auto_login_and_retrieve(update, context)
     else:
-        # Need login credentials
         await query.edit_message_text(
             "🔑 Please send your *H&M email address* to login:",
             parse_mode="Markdown",
@@ -225,8 +236,7 @@ async def gc_email_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return GC_ENTER_EMAIL
     context.user_data["gc_email"] = email
     await update.message.reply_text(
-        "🔑 Send your *H&M password*:\n\n"
-        "⚠️ _Message will be deleted immediately._",
+        "🔑 Send your *H&M password*:",
         parse_mode="Markdown",
     )
     return GC_ENTER_PASSWORD
@@ -235,23 +245,28 @@ async def gc_email_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @authorized_only
 async def gc_password_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text.strip()
-    await delete_sensitive_message(context, update.message.chat_id, update.message.message_id)
     context.user_data["gc_password"] = password
 
-    # Login first, then get code
-    resources = get_bot_data(context)
-    hm_client = resources["hm"]
-    chat_id = update.message.chat_id
+    return await gc_auto_login_and_retrieve(update, context)
+
+
+async def gc_auto_login_and_retrieve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log into H&M and retrieve code, keeping credentials saved."""
+    query = update.callback_query
+    chat_id = query.message.chat_id if query else update.message.chat_id
     region = context.user_data.get("gc_region", "en_in")
     email = context.user_data.get("gc_email", "")
+    password = context.user_data.get("gc_password", "")
+
+    resources = get_bot_data(context)
+    hm_client = resources["hm"]
 
     async def progress_cb(msg):
         await context.bot.send_message(chat_id=chat_id, text=msg)
 
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Logging into H&M...")
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Logging into H&M with saved credentials...")
 
     login_result = await hm_client.login(email, password, region, progress_cb)
-    context.user_data.pop("gc_password", None)
 
     if not login_result.get("success"):
         await context.bot.send_message(
@@ -304,13 +319,20 @@ async def gc_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await hm_client.get_spotify_code(region, progress_cb)
 
     if result.get("need_login"):
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="🔑 H&M session expired. Please send your *H&M email* to login:",
-            parse_mode="Markdown",
-        )
-        context.user_data["gc_has_session"] = False
-        return GC_ENTER_EMAIL
+        if context.user_data.get("gc_email") and context.user_data.get("gc_password"):
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🔑 Session refreshed — logging in automatically with your saved credentials...",
+            )
+            return await gc_auto_login_and_retrieve(update, context)
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🔑 H&M session expired. Please send your *H&M email* to login:",
+                parse_mode="Markdown",
+            )
+            context.user_data["gc_has_session"] = False
+            return GC_ENTER_EMAIL
 
     if result.get("success"):
         redeem_url = result.get("redeem_url")
@@ -360,13 +382,24 @@ async def redeem_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["rd_code"] = code
         context.user_data["rd_code_id"] = code_record["id"]
 
-        # Check Spotify session
+        # Check Spotify session and saved account
         sp_session = await db.get_session("spotify")
-        if sp_session:
+        if not context.user_data.get("rd_email"):
+            saved_acc = await db.get_account("spotify")
+            if saved_acc:
+                try:
+                    context.user_data["rd_email"] = cred.decrypt(saved_acc["email_encrypted"])
+                    context.user_data["rd_password"] = cred.decrypt(saved_acc["password_encrypted"])
+                except Exception:
+                    pass
+
+        if sp_session or (context.user_data.get("rd_email") and context.user_data.get("rd_password")):
+            acc_note = ""
+            if not sp_session and context.user_data.get("rd_email"):
+                acc_note = f"\n👤 Using saved Spotify account: `{mask_email(context.user_data['rd_email'])}`"
             await query.edit_message_text(
                 f"🎁 *Redeem Spotify Code*\n\n"
-                f"🎟️ Code: `{code}`\n"
-                f"✅ Spotify session active\n\n"
+                f"🎟️ Code / Link: `{code}`{acc_note}\n\n"
                 f"Redeem this code now?",
                 parse_mode="Markdown",
                 reply_markup=get_confirm_keyboard(),
@@ -405,13 +438,22 @@ async def rd_code_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     resources = get_bot_data(context)
     db = resources["db"]
+    cred = resources["cred"]
     sp_session = await db.get_session("spotify")
 
-    if sp_session:
+    if not context.user_data.get("rd_email"):
+        saved_acc = await db.get_account("spotify")
+        if saved_acc:
+            try:
+                context.user_data["rd_email"] = cred.decrypt(saved_acc["email_encrypted"])
+                context.user_data["rd_password"] = cred.decrypt(saved_acc["password_encrypted"])
+            except Exception:
+                pass
+
+    if sp_session or (context.user_data.get("rd_email") and context.user_data.get("rd_password")):
         await update.message.reply_text(
             f"🎁 *Redeem Spotify Code*\n\n"
-            f"🎟️ Code: `{code}`\n"
-            f"✅ Spotify session active\n\n"
+            f"🎟️ Code: `{code}`\n\n"
             f"Redeem this code now?",
             parse_mode="Markdown",
             reply_markup=get_confirm_keyboard(),
@@ -433,8 +475,7 @@ async def rd_email_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return RD_ENTER_EMAIL
     context.user_data["rd_email"] = email
     await update.message.reply_text(
-        "🔑 Send your *Spotify password*:\n\n"
-        "⚠️ _Message will be deleted immediately._",
+        "🔑 Send your *Spotify password*:",
         parse_mode="Markdown",
     )
     return RD_ENTER_PASSWORD
@@ -443,7 +484,6 @@ async def rd_email_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @authorized_only
 async def rd_password_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text.strip()
-    await delete_sensitive_message(context, update.message.chat_id, update.message.message_id)
     context.user_data["rd_password"] = password
 
     # Login to Spotify
@@ -457,7 +497,6 @@ async def rd_password_received(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await context.bot.send_message(chat_id=chat_id, text="⏳ Logging into Spotify...")
     login_result = await spotify.login(email, password, progress_cb)
-    context.user_data.pop("rd_password", None)
 
     if not login_result.get("success"):
         await context.bot.send_message(
@@ -490,17 +529,26 @@ async def rd_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = context.user_data.get("rd_code", "")
     chat_id = query.message.chat_id
 
-    await query.edit_message_text(
-        f"⏳ *Redeeming Spotify code...*\n\n🎟️ `{code}`",
-        parse_mode="Markdown",
-    )
-
     resources = get_bot_data(context)
     spotify = resources["spotify"]
     db = resources["db"]
 
     async def progress_cb(msg):
         await context.bot.send_message(chat_id=chat_id, text=msg)
+
+    # Check if we need to auto-login to Spotify first
+    sp_session = await db.get_session("spotify")
+    if not sp_session and context.user_data.get("rd_email") and context.user_data.get("rd_password"):
+        await query.edit_message_text("⏳ *Logging into Spotify with saved account...*", parse_mode="Markdown")
+        login_res = await spotify.login(context.user_data["rd_email"], context.user_data["rd_password"], progress_cb)
+        if not login_res.get("success"):
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Spotify login failed: {login_res.get('message')}")
+            return ConversationHandler.END
+
+    await query.edit_message_text(
+        f"⏳ *Redeeming Spotify code...*\n\n🎟️ `{code}`",
+        parse_mode="Markdown",
+    )
 
     result = await spotify.redeem_code(code, progress_cb)
 
@@ -511,12 +559,22 @@ async def rd_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.update_spotify_code_status(code_id, status)
 
     if result.get("need_login"):
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="🔑 Spotify session expired. Please send your *Spotify email*:",
-            parse_mode="Markdown",
-        )
-        return RD_ENTER_EMAIL
+        if context.user_data.get("rd_email") and context.user_data.get("rd_password"):
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🔑 Spotify session refreshed — logging in automatically with your saved credentials...",
+            )
+            login_res = await spotify.login(context.user_data["rd_email"], context.user_data["rd_password"], progress_cb)
+            if login_res.get("success"):
+                result = await spotify.redeem_code(code, progress_cb)
+
+        if result.get("need_login"):
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🔑 Spotify session expired. Please send your *Spotify email*:",
+                parse_mode="Markdown",
+            )
+            return RD_ENTER_EMAIL
 
     if result.get("success"):
         text = f"🎁 *Spotify Code Redeemed!*\n\n✅ {result['message']}"
@@ -540,8 +598,9 @@ async def rd_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def spotify_cancelled(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    for key in ["sp_password", "sp_email", "rd_password", "rd_email", "rd_code", "gc_password", "gc_email"]:
-        context.user_data.pop(key, None)
+    # Only clear temporary operation code, preserve saved credentials and sessions
+    context.user_data.pop("rd_code", None)
+    context.user_data.pop("rd_code_id", None)
     await query.edit_message_text("❌ Operation cancelled.", reply_markup=get_back_keyboard())
     return ConversationHandler.END
 

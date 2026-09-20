@@ -95,8 +95,7 @@ async def hm_email_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["hm_email"] = email
 
     await update.message.reply_text(
-        "🔑 Now send your *password*.\n\n"
-        "⚠️ _Your message will be deleted immediately for security._",
+        "🔑 Now send your *password*:",
         parse_mode="Markdown",
     )
     return HM_ENTER_PASSWORD
@@ -116,8 +115,7 @@ async def hm_password_received(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if len(password) < 6:
         await update.message.reply_text(
-            "⚠️ Password is too short (minimum 6 characters). Please try again:\n\n"
-            "⚠️ _Your message will be deleted immediately._",
+            "⚠️ Password is too short (minimum 6 characters). Please try again:",
             parse_mode="Markdown",
         )
         return HM_ENTER_PASSWORD
@@ -168,8 +166,7 @@ async def hm_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     result = await hm_client.create_account(email, password, region, progress_cb)
 
-    # Clear sensitive data from user_data
-    context.user_data.pop("hm_password", None)
+    # Keep credentials in memory and DB until Clear Session is clicked
 
     # Build result message
     if result.get("success"):
