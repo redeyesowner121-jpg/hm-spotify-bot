@@ -57,30 +57,23 @@ class HMClient:
             context = await self.browser.get_context("hm")
             page = await context.new_page()
 
+            # Speed optimization: Block images, fonts, and media to load page in 1-2s
+            await page.route(
+                "**/*.{png,jpg,jpeg,webp,svg,gif,woff,woff2,ttf,otf,ico,mp4}",
+                lambda route: route.abort()
+            )
+
+            # Fast navigation with domcontentloaded
+            await page.goto(urls["login"], wait_until="domcontentloaded", timeout=20000)
+            await asyncio.sleep(1)
+
+            # 1. Quickly dismiss OneTrust cookie banner if visible
             try:
-                await page.goto(urls["login"], wait_until="networkidle", timeout=30000)
+                c_btn = await page.query_selector("#onetrust-accept-btn-handler, button:has-text('Alle Cookies akzeptieren'), button:has-text('Akzeptieren'), button:has-text('Accept')")
+                if c_btn and await c_btn.is_visible():
+                    await c_btn.click()
             except Exception:
-                await page.goto(urls["login"], wait_until="domcontentloaded", timeout=30000)
-
-            await asyncio.sleep(3)
-
-            # 1. Dismiss OneTrust cookie banner (covers the screen)
-            for c_sel in [
-                "#onetrust-accept-btn-handler",
-                "button#onetrust-accept-btn-handler",
-                "button:has-text('Alle Cookies akzeptieren')",
-                "button:has-text('Akzeptieren')",
-                "button:has-text('Accept all cookies')",
-                "button:has-text('Accept')",
-            ]:
-                try:
-                    c_btn = await page.query_selector(c_sel)
-                    if c_btn and await c_btn.is_visible():
-                        await c_btn.click()
-                        await asyncio.sleep(1)
-                        break
-                except Exception:
-                    pass
+                pass
 
             # 2. Check for CAPTCHA
             if await self.browser.detect_captcha(page):
@@ -94,44 +87,20 @@ class HMClient:
 
             await progress_cb("📝 Entering details to initiate registration...")
 
-            # 3. Locate email field across main page and all frames
-            email_selectors = [
-                "input[type='email']",
-                "input[name='email']",
-                "input#email",
-                "input[id*='email' i]",
-                "input[data-testid*='email' i]",
-                "input[placeholder*='email' i]",
-                "input[placeholder*='e-mail' i]",
-                "input[aria-label*='email' i]",
-                "input[aria-label*='e-mail' i]",
-            ]
+            # 3. Fast combined email field detection
+            combined_email_sel = (
+                "input[type='email'], input[name='email'], input#email, "
+                "input[id*='email' i], input[data-testid*='email' i], "
+                "input[placeholder*='email' i], input[placeholder*='e-mail' i]"
+            )
 
             email_el = None
-            for sel in email_selectors:
-                try:
-                    el = await page.wait_for_selector(sel, state="visible", timeout=8000)
-                    if el:
-                        email_el = el
-                        break
-                except Exception:
-                    continue
+            try:
+                email_el = await page.wait_for_selector(combined_email_sel, state="visible", timeout=4000)
+            except Exception:
+                pass
 
-            # Check child frames if not on main page
-            if not email_el:
-                for frame in page.frames:
-                    for sel in email_selectors:
-                        try:
-                            el = await frame.query_selector(sel)
-                            if el and await el.is_visible():
-                                email_el = el
-                                break
-                        except Exception:
-                            continue
-                    if email_el:
-                        break
-
-            # If modal didn't open automatically on /login, click the profile/account icon in header
+            # If modal didn't open automatically on /login, click profile icon in header
             if not email_el:
                 await progress_cb("👤 Opening sign-in modal...")
                 clicked_prof = False
@@ -141,23 +110,16 @@ class HMClient:
                     "a[data-testid='myAccount']",
                     "[data-testid*='account' i]",
                     "a[href*='login']",
-                    "a[href*='signin']",
-                    "button:has-text('Sign in')",
                     "button:has-text('Anmelden')",
-                    "a:has-text('Sign in')",
-                    "a:has-text('Anmelden')",
-                    "[aria-label*='anmelden' i]",
-                    "[aria-label*='account' i]",
-                    "[aria-label*='sign in' i]",
+                    "button:has-text('Sign in')",
                     ".menu__myhm",
-                    ".account-link",
                 ]:
                     try:
                         pbtn = await page.query_selector(psel)
                         if pbtn and await pbtn.is_visible():
                             await pbtn.click()
                             clicked_prof = True
-                            await asyncio.sleep(3)
+                            await asyncio.sleep(1.5)
                             break
                     except Exception:
                         continue
@@ -176,34 +138,26 @@ class HMClient:
                                 if (el) el.click();
                             }
                         """)
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(1.5)
                     except Exception:
                         pass
 
-                # Now wait for email input
-                for sel in email_selectors:
+                # Fast wait for email input after clicking
+                try:
+                    email_el = await page.wait_for_selector(combined_email_sel, state="visible", timeout=5000)
+                except Exception:
+                    pass
+
+            # Fallback: check child frames
+            if not email_el:
+                for frame in page.frames:
                     try:
-                        el = await page.wait_for_selector(sel, state="visible", timeout=8000)
-                        if el:
+                        el = await frame.query_selector(combined_email_sel)
+                        if el and await el.is_visible():
                             email_el = el
                             break
                     except Exception:
                         continue
-
-            # Fallback: inspect all visible input elements in page and frames
-            if not email_el:
-                for target in [page] + page.frames:
-                    all_inputs = await target.query_selector_all("input")
-                    for inp in all_inputs:
-                        if await inp.is_visible():
-                            itype = (await inp.get_attribute("type") or "").lower()
-                            iname = (await inp.get_attribute("name") or "").lower()
-                            ipl = (await inp.get_attribute("placeholder") or "").lower()
-                            if "email" in iname or "email" in itype or "email" in ipl or "e-mail" in ipl or itype == "text":
-                                email_el = inp
-                                break
-                    if email_el:
-                        break
 
             if not email_el:
                 page_title = await page.title()
@@ -214,32 +168,16 @@ class HMClient:
                     "details": f"Page title: {page_title}. Please register manually if blocked by bot protection.",
                 }
 
-            # 4. Fill email
+            # 4. Fill email swiftly
             await email_el.click()
-            await email_el.fill("")
             await email_el.fill(email)
-            await asyncio.sleep(1)
 
-            # 5. Click CONTINUE / WEITER button (H&M 2-step sign in / sign up modal)
-            for cont_sel in [
-                "button:has-text('CONTINUE')",
-                "button:has-text('Continue')",
-                "button:has-text('WEITER')",
-                "button:has-text('Weiter')",
-                "button:has-text('Fortfahren')",
-                "button[type='submit']",
-                "button[data-testid*='submit']",
-                "button[data-testid*='continue']",
-            ]:
-                try:
-                    cbtn = await page.query_selector(cont_sel)
-                    if cbtn and await cbtn.is_visible():
-                        await cbtn.click()
-                        break
-                except Exception:
-                    continue
-
-            await asyncio.sleep(3)
+            # 5. Click CONTINUE / WEITER button
+            continue_btn = page.locator("button:has-text('CONTINUE'), button:has-text('WEITER'), button:has-text('Weiter'), button:has-text('Continue'), button[type='submit']").first
+            try:
+                await continue_btn.click(timeout=2000)
+            except Exception:
+                await email_el.press("Enter")
 
             # Check for CAPTCHA after clicking Continue
             if await self.browser.detect_captcha(page):
@@ -249,28 +187,16 @@ class HMClient:
                     return {"success": False, "message": "CAPTCHA resolution timed out"}
 
             # 6. Wait for password field to appear
+            combined_pwd_sel = "input[type='password'], input[name='password'], input#password, input[id*='password' i]"
             password_el = None
-            password_selectors = [
-                "input[type='password']",
-                "input[name='password']",
-                "input#password",
-                "input[id*='password' i]",
-                "input[data-testid*='password' i]",
-            ]
-            for psel in password_selectors:
-                try:
-                    el = await page.wait_for_selector(psel, state="visible", timeout=8000)
-                    if el:
-                        password_el = el
-                        break
-                except Exception:
-                    continue
+            try:
+                password_el = await page.wait_for_selector(combined_pwd_sel, state="visible", timeout=6000)
+            except Exception:
+                pass
 
             if password_el:
                 await password_el.click()
-                await password_el.fill("")
                 await password_el.fill(password)
-                await asyncio.sleep(0.5)
 
             # 7. Fill registration extra fields: First Name & Date of Birth
             first_name = email.split("@")[0]
@@ -523,12 +449,14 @@ class HMClient:
             context = await self.browser.get_context("hm")
             page = await context.new_page()
 
-            try:
-                await page.goto(urls["login"], wait_until="networkidle", timeout=30000)
-            except Exception:
-                await page.goto(urls["login"], wait_until="domcontentloaded", timeout=30000)
+            # Speed optimization: Block heavy media assets
+            await page.route(
+                "**/*.{png,jpg,jpeg,webp,svg,gif,woff,woff2,ttf,otf,ico,mp4}",
+                lambda route: route.abort()
+            )
 
-            await asyncio.sleep(2)
+            await page.goto(urls["login"], wait_until="domcontentloaded", timeout=20000)
+            await asyncio.sleep(1)
 
             # Dismiss OneTrust cookie banner
             for c_sel in [
