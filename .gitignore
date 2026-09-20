@@ -1,0 +1,14 @@
+# H&M + Spotify Bot
+.env
+data/
+*.db
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
