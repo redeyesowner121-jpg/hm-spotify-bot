@@ -55,8 +55,6 @@ class Settings:
         errors = []
         if not self.TELEGRAM_BOT_TOKEN:
             errors.append("TELEGRAM_BOT_TOKEN is required")
-        if not self.AUTHORIZED_USER_IDS:
-            errors.append("AUTHORIZED_USER_IDS is required (comma-separated Telegram user IDs)")
         if not self.ENCRYPTION_KEY:
             errors.append("ENCRYPTION_KEY is required — generate with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"")
         if errors:

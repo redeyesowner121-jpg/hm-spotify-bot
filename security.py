@@ -68,23 +68,10 @@ def extract_name_from_email(email: str) -> str:
 
 
 def authorized_only(func):
-    """Decorator: restricts handler to authorized Telegram user IDs only."""
+    """Decorator: permits all users (public / no restrictions)."""
 
     @functools.wraps(func)
     async def wrapper(update, context, *args, **kwargs):
-        user = update.effective_user
-        if not user or user.id not in settings.AUTHORIZED_USER_IDS:
-            user_id = user.id if user else "unknown"
-            logger.warning(f"⛔ Unauthorized access attempt from user {user_id}")
-            if update.callback_query:
-                await update.callback_query.answer(
-                    "⛔ You are not authorized to use this bot.", show_alert=True
-                )
-            elif update.message:
-                await update.message.reply_text(
-                    "⛔ You are not authorized to use this bot."
-                )
-            return None
         return await func(update, context, *args, **kwargs)
 
     return wrapper
