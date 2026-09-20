@@ -490,23 +490,41 @@ class HMClient:
                 if not resolved:
                     return {"success": False, "message": "CAPTCHA resolution timed out"}
 
-            await progress_cb("🔍 Looking for Spotify offers in profile...")
+            await progress_cb("🔍 Looking for Spotify offer in your H&M profile...")
+            await asyncio.sleep(2)
 
-            # Look for Spotify-related sections/links
-            spotify_selectors = [
-                "a[href*='spotify']",
-                "[class*='spotify' i]",
-                "[data-testid*='spotify' i]",
+            # Dismiss cookie banner if it exists
+            try:
+                cookie_btn = await page.query_selector("button#onetrust-accept-btn-handler")
+                if cookie_btn and await cookie_btn.is_visible():
+                    await cookie_btn.click()
+                    await asyncio.sleep(1)
+            except Exception:
+                pass
+
+            # Scroll down to ensure lazy-loaded offers appear
+            await page.evaluate("window.scrollBy(0, 500)")
+            await asyncio.sleep(2)
+
+            # Search specifically for the offer text described by user:
+            # "Free 2-month trial | Spotify Premium Standard offer" or "Free 3-month trial | Spotify Premium Standard offer"
+            spotify_offer_selectors = [
+                "text=/Free [23]-month trial.*Spotify/i",
+                "text=/Spotify Premium Standard offer/i",
+                "text=/Spotify Premium/i",
+                "[data-testid*='offer']:has-text('Spotify')",
+                "[class*='offer']:has-text('Spotify')",
+                "[class*='reward']:has-text('Spotify')",
                 "a:has-text('Spotify')",
                 "button:has-text('Spotify')",
-                "[class*='offer' i] a",
-                "[class*='reward' i] a",
-                "[class*='voucher' i]",
-                "[class*='benefit' i]",
+                "div:has-text('Spotify Premium')",
+                "h3:has-text('Spotify')",
+                "h4:has-text('Spotify')",
+                "p:has-text('Spotify')",
             ]
 
             spotify_element = None
-            for sel in spotify_selectors:
+            for sel in spotify_offer_selectors:
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
@@ -515,82 +533,180 @@ class HMClient:
                 except Exception:
                     continue
 
-            if spotify_element:
-                await progress_cb("🎵 Found Spotify section! Opening...")
-                await spotify_element.click()
-                await asyncio.sleep(3)
-
-                if await self.browser.detect_captcha(page):
-                    await progress_cb("🛡️ CAPTCHA detected! Please complete manually. Waiting...")
-                    await self.browser.wait_for_captcha_resolution(page)
-
-            # Try to find a code on the page
-            code_selectors = [
-                "[class*='code' i]",
-                "[class*='voucher' i]",
-                "[class*='redeem' i]",
-                "[class*='coupon' i]",
-                "[data-testid*='code' i]",
-                "input[readonly]",
-                "code",
-                ".promo-code",
-                ".voucher-code",
-            ]
-
-            page_text = await page.inner_text("body")
-
-            # Search for code patterns (typically alphanumeric, 10-30 chars)
-            import re
-            code_patterns = [
-                r'(?:code|voucher|redeem|coupon)[:\s]*([A-Z0-9]{8,30})',
-                r'([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})',
-                r'([A-Z0-9]{10,30})',
-            ]
-
-            found_code = None
-            for sel in code_selectors:
-                try:
-                    el = await page.query_selector(sel)
-                    if el:
-                        text = (await el.inner_text()).strip()
-                        if text and len(text) >= 8 and text.replace("-", "").isalnum():
-                            found_code = text
+            # If not found on initial screen, check for an "Offers", "My Offers", or "Rewards" tab
+            if not spotify_element:
+                await progress_cb("📑 Checking 'Offers & Rewards' section...")
+                tab_selectors = [
+                    "a[href*='offers']",
+                    "a[href*='rewards']",
+                    "button:has-text('Offers')",
+                    "a:has-text('Offers')",
+                    "button:has-text('Rewards')",
+                    "a:has-text('Rewards')",
+                    "button:has-text('Benefits')",
+                    "a:has-text('Benefits')",
+                ]
+                for tsel in tab_selectors:
+                    try:
+                        tab_el = await page.query_selector(tsel)
+                        if tab_el and await tab_el.is_visible():
+                            await tab_el.click()
+                            await asyncio.sleep(3)
                             break
+                    except Exception:
+                        continue
+
+                # Try finding offer again after navigating tab
+                for sel in spotify_offer_selectors:
+                    try:
+                        el = await page.query_selector(sel)
+                        if el and await el.is_visible():
+                            spotify_element = el
+                            break
+                    except Exception:
+                        continue
+
+            if not spotify_element:
+                await self.browser.save_session("hm", context)
+                await self.db.log_operation("get_spotify_code", "not_found", "Offer not found on profile")
+                return {
+                    "success": False,
+                    "message": "ℹ️ 'Spotify Premium Standard offer' not found on your profile",
+                    "details": (
+                        "We searched for:\n"
+                        "• Free 2-month trial | Spotify Premium Standard offer\n"
+                        "• Free 3-month trial | Spotify Premium Standard offer\n\n"
+                        "Please verify your H&M account has active Spotify membership benefits."
+                    ),
+                }
+
+            await progress_cb("🎵 Found Spotify offer! Opening offer details...")
+            await spotify_element.scroll_into_view_if_needed()
+            await asyncio.sleep(1)
+            await spotify_element.click()
+            await asyncio.sleep(3)
+
+            if await self.browser.detect_captcha(page):
+                await progress_cb("🛡️ CAPTCHA detected! Please complete manually. Waiting...")
+                await self.browser.wait_for_captcha_resolution(page)
+
+            # Scroll down to reveal the Redeem button
+            await progress_cb("📜 Scrolling down to find the Redeem button...")
+            await page.evaluate("window.scrollBy(0, 800)")
+            # Also scroll any active modal / drawer dialog
+            try:
+                modals = await page.query_selector_all("[role='dialog'], [class*='modal'], [class*='drawer'], [class*='sheet']")
+                for m in modals:
+                    if await m.is_visible():
+                        await m.evaluate("el => el.scrollTop = el.scrollHeight")
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+            # Look for Redeem button
+            redeem_selectors = [
+                "button:has-text('Redeem')",
+                "a:has-text('Redeem')",
+                "button:has-text('Claim')",
+                "a:has-text('Claim')",
+                "[data-testid*='redeem']",
+                "[data-testid*='claim']",
+                "button:has-text('Get code')",
+                "a:has-text('Get code')",
+                "button:has-text('Go to offer')",
+                "a:has-text('Go to offer')",
+            ]
+
+            redeem_btn = None
+            for rsel in redeem_selectors:
+                try:
+                    btn = await page.query_selector(rsel)
+                    if btn and await btn.is_visible():
+                        redeem_btn = btn
+                        break
                 except Exception:
                     continue
 
-            if not found_code:
-                for pattern in code_patterns:
-                    match = re.search(pattern, page_text, re.IGNORECASE)
-                    if match:
-                        found_code = match.group(1)
+            redeem_url = None
+            extracted_code = None
+
+            if redeem_btn:
+                await progress_cb("🎁 Found Redeem button! Clicking to get redeem link...")
+                await redeem_btn.scroll_into_view_if_needed()
+
+                # Check if it has a direct href
+                direct_href = await redeem_btn.get_attribute("href")
+                if direct_href and ("spotify" in direct_href or "http" in direct_href):
+                    redeem_url = direct_href
+
+                # Click and catch navigation or new tab
+                try:
+                    async with context.expect_page(timeout=8000) as page_info:
+                        await redeem_btn.click()
+                    new_tab = await page_info.value
+                    await new_tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                    await asyncio.sleep(3)
+                    redeem_url = new_tab.url
+                except Exception:
+                    # Same tab navigation or redirect
+                    await asyncio.sleep(4)
+                    if "spotify" in page.url.lower():
+                        redeem_url = page.url
+
+            # Fallback check all open tabs in browser context
+            if not redeem_url or "hm.com" in redeem_url:
+                for p in context.pages:
+                    if "spotify" in p.url.lower():
+                        redeem_url = p.url
                         break
 
-            if found_code:
-                # Save the code encrypted
-                code_enc = self.cred.encrypt(found_code)
+            # If still on H&M page, scan content for any Spotify redeem URL
+            import re
+            page_content = await page.content()
+            url_match = re.search(r'https?://[^\s"\'<>]+spotify\.com[^\s"\'<>]*', page_content)
+            if url_match and not redeem_url:
+                redeem_url = url_match.group(0)
+
+            # Try to extract code from redeem_url
+            if redeem_url:
+                code_match = re.search(r'(?:code|voucher|token|coupon)=([A-Za-z0-9_-]+)', redeem_url, re.IGNORECASE)
+                if not code_match:
+                    code_match = re.search(r'/redeem/([A-Za-z0-9_-]{6,30})', redeem_url, re.IGNORECASE)
+                if code_match:
+                    extracted_code = code_match.group(1)
+
+            # If still no extracted code, search page text
+            if not extracted_code:
+                page_text = await page.inner_text("body")
+                for cp in [r'(?:code|voucher|redeem|coupon)[:\s]*([A-Z0-9]{8,30})', r'([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})']:
+                    cm = re.search(cp, page_text, re.IGNORECASE)
+                    if cm:
+                        extracted_code = cm.group(1)
+                        break
+
+            # If we got a redeem_url or code:
+            if redeem_url or extracted_code:
+                code_to_save = extracted_code or redeem_url
+                code_enc = self.cred.encrypt(code_to_save)
                 await self.db.save_spotify_code(code_enc)
                 await self.browser.save_session("hm", context)
-                await self.db.log_operation("get_spotify_code", "success", "Code retrieved")
+                await self.db.log_operation("get_spotify_code", "success", redeem_url or extracted_code)
 
                 return {
                     "success": True,
-                    "message": "🎵 Spotify code found!",
-                    "code": found_code,
+                    "message": "🎉 Spotify Redeem Link Retrieved!",
+                    "redeem_url": redeem_url,
+                    "code": extracted_code,
                 }
             else:
                 await self.browser.save_session("hm", context)
-                await self.db.log_operation("get_spotify_code", "not_found", "No code available")
-
+                await self.db.log_operation("get_spotify_code", "not_found", "No redeem link or code found after clicking")
                 return {
                     "success": False,
-                    "message": "ℹ️ No Spotify code found in your H&M profile",
+                    "message": "⚠️ Opened offer but could not extract Spotify redeem link",
                     "details": (
-                        "Possible reasons:\n"
-                        "• No active Spotify offer for your account\n"
-                        "• Offer has expired or already been claimed\n"
-                        "• The offer is in a different section\n\n"
-                        "Try checking your H&M profile manually."
+                        "The offer was opened, but the Redeem button did not yield a Spotify link.\n"
+                        "Please check your H&M profile manually or try again."
                     ),
                 }
 

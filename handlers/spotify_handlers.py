@@ -265,10 +265,16 @@ async def gc_password_received(update: Update, context: ContextTypes.DEFAULT_TYP
     await context.bot.send_message(chat_id=chat_id, text="✅ Login successful! Retrieving Spotify code...")
 
     result = await hm_client.get_spotify_code(region, progress_cb)
-    _send_code_result(result)
 
     if result.get("success"):
-        text = f"🎶 *Spotify Code Retrieved!*\n\n🎟️ Code: `{result.get('code', 'N/A')}`"
+        redeem_url = result.get("redeem_url")
+        code = result.get("code")
+        text = "🎉 *Spotify Offer Retrieved!*\n\n"
+        if redeem_url:
+            text += f"🔗 *Redeem Link:*\n{redeem_url}\n\n"
+        if code and code != redeem_url:
+            text += f"🎟️ *Voucher Code:* `{code}`\n\n"
+        text += "👉 Click the redeem link to activate your Spotify Premium offer!"
     else:
         text = f"🎶 *Spotify Code Retrieval*\n\n{result.get('message', 'Failed')}"
         if result.get("details"):
@@ -307,7 +313,14 @@ async def gc_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return GC_ENTER_EMAIL
 
     if result.get("success"):
-        text = f"🎶 *Spotify Code Retrieved!*\n\n🎟️ Code: `{result.get('code', 'N/A')}`"
+        redeem_url = result.get("redeem_url")
+        code = result.get("code")
+        text = "🎉 *Spotify Offer Retrieved!*\n\n"
+        if redeem_url:
+            text += f"🔗 *Redeem Link:*\n{redeem_url}\n\n"
+        if code and code != redeem_url:
+            text += f"🎟️ *Voucher Code:* `{code}`\n\n"
+        text += "👉 Click the redeem link to activate your Spotify Premium offer!"
     else:
         text = f"🎶 *Spotify Code Retrieval*\n\n{result.get('message', 'Failed')}"
         if result.get("details"):
