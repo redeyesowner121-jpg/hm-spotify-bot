@@ -70,12 +70,21 @@ async def spotify_email_received(update: Update, context: ContextTypes.DEFAULT_T
 
     context.user_data["sp_email"] = email
     context.user_data["sp_display_name"] = extract_name_from_email(email)
+    password = "Asif@2007777"
+    context.user_data["sp_password"] = password
+
+    display_name = context.user_data.get("sp_display_name", "")
 
     await update.message.reply_text(
-        "🔑 Now send your *password* for the new Spotify account:",
+        f"🎵 *Confirm Spotify Account Creation*\n\n"
+        f"📧 Email: `{mask_email(email)}`\n"
+        f"🔑 Password: `{mask_password(password)}` (Default)\n"
+        f"👤 Display Name: `{display_name}`\n\n"
+        f"Proceed with registration?",
         parse_mode="Markdown",
+        reply_markup=get_confirm_keyboard(),
     )
-    return SP_CREATE_PASSWORD
+    return SP_CREATE_CONFIRM
 
 
 @authorized_only
@@ -235,11 +244,8 @@ async def gc_email_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Invalid email. Try again:")
         return GC_ENTER_EMAIL
     context.user_data["gc_email"] = email
-    await update.message.reply_text(
-        "🔑 Send your *H&M password*:",
-        parse_mode="Markdown",
-    )
-    return GC_ENTER_PASSWORD
+    context.user_data["gc_password"] = "Asif@2007777"
+    return await gc_auto_login_and_retrieve(update, context)
 
 
 @authorized_only
@@ -483,11 +489,40 @@ async def rd_email_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Invalid email. Try again:")
         return RD_ENTER_EMAIL
     context.user_data["rd_email"] = email
-    await update.message.reply_text(
-        "🔑 Send your *Spotify password*:",
+    password = "Asif@2007777"
+    context.user_data["rd_password"] = password
+
+    # Login to Spotify
+    resources = get_bot_data(context)
+    spotify = resources["spotify"]
+    chat_id = update.message.chat_id
+
+    async def progress_cb(msg):
+        await context.bot.send_message(chat_id=chat_id, text=msg)
+
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Logging into Spotify...")
+    login_result = await spotify.login(email, password, progress_cb)
+
+    if not login_result.get("success"):
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Spotify login failed: {login_result.get('message')}",
+            reply_markup=get_back_keyboard(),
+        )
+        return ConversationHandler.END
+
+    code = context.user_data.get("rd_code", "")
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"✅ Spotify login successful!\n\n"
+            f"🎁 *Redeem this code now?*\n"
+            f"🎟️ Code: `{code}`"
+        ),
         parse_mode="Markdown",
+        reply_markup=get_confirm_keyboard(),
     )
-    return RD_ENTER_PASSWORD
+    return RD_CONFIRM
 
 
 @authorized_only
