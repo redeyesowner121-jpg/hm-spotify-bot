@@ -57,6 +57,7 @@ async def post_init(application: Application):
     # Initialize database
     db = Database(settings.DATABASE_PATH)
     await db.initialize()
+    await db.purge_junk_codes(cred)
     application.bot_data["db"] = db
     logger.info("💾 Database initialized")
 
