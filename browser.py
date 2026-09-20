@@ -37,7 +37,7 @@ class BrowserManager:
         self._browser: Browser | None = None
 
     async def initialize(self):
-        """Launch the Playwright browser."""
+        """Launch the Playwright browser with anti-detection args."""
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(
             headless=self.headless,
@@ -45,14 +45,18 @@ class BrowserManager:
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-infobars",
+                "--window-size=1920,1080",
             ],
+            ignore_default_args=["--enable-automation"],
         )
         logger.info(f"Browser launched (headless={self.headless})")
 
     async def get_context(self, service: str) -> BrowserContext:
         """
         Create a new browser context, restoring saved session cookies if available.
-        Returns a fresh context with a realistic user-agent.
+        Returns a fresh context with realistic headers and anti-detection scripts.
         """
         if not self._browser:
             raise RuntimeError("Browser not initialized — call initialize() first")
@@ -72,11 +76,44 @@ class BrowserManager:
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "Chrome/124.0.0.0 Safari/537.36"
             ),
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
+            viewport={"width": 1920, "height": 1080},
+            locale="de-DE",
+            timezone_id="Europe/Berlin",
+            extra_http_headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+            },
         )
+
+        # Anti-detection stealth script to mask automation
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['de-DE', 'de', 'en-US', 'en']
+            });
+            window.chrome = {
+                runtime: {},
+                app: {},
+                csi: function(){},
+                loadTimes: function(){},
+            };
+        """)
+
         return context
 
     async def save_session(self, service: str, context: BrowserContext):

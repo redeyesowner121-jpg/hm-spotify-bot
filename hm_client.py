@@ -57,11 +57,16 @@ class HMClient:
             context = await self.browser.get_context("hm")
             page = await context.new_page()
 
-            await page.goto(urls["login"], wait_until="domcontentloaded", timeout=30000)
+            try:
+                await page.goto(urls["login"], wait_until="networkidle", timeout=30000)
+            except Exception:
+                await page.goto(urls["login"], wait_until="domcontentloaded", timeout=30000)
+
             await asyncio.sleep(3)
 
             # 1. Dismiss OneTrust cookie banner (covers the screen)
             for c_sel in [
+                "#onetrust-accept-btn-handler",
                 "button#onetrust-accept-btn-handler",
                 "button:has-text('Alle Cookies akzeptieren')",
                 "button:has-text('Akzeptieren')",
@@ -89,7 +94,7 @@ class HMClient:
 
             await progress_cb("📝 Entering details to initiate registration...")
 
-            # 3. Locate email field - wait for it to be visible in the modal
+            # 3. Locate email field across main page and all frames
             email_selectors = [
                 "input[type='email']",
                 "input[name='email']",
@@ -105,12 +110,26 @@ class HMClient:
             email_el = None
             for sel in email_selectors:
                 try:
-                    el = await page.wait_for_selector(sel, state="visible", timeout=4000)
+                    el = await page.wait_for_selector(sel, state="visible", timeout=8000)
                     if el:
                         email_el = el
                         break
                 except Exception:
                     continue
+
+            # Check child frames if not on main page
+            if not email_el:
+                for frame in page.frames:
+                    for sel in email_selectors:
+                        try:
+                            el = await frame.query_selector(sel)
+                            if el and await el.is_visible():
+                                email_el = el
+                                break
+                        except Exception:
+                            continue
+                    if email_el:
+                        break
 
             # If modal didn't open automatically on /login, click the profile/account icon in header
             if not email_el:
@@ -128,7 +147,7 @@ class HMClient:
                         pbtn = await page.query_selector(psel)
                         if pbtn and await pbtn.is_visible():
                             await pbtn.click()
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(3)
                             break
                     except Exception:
                         continue
@@ -136,30 +155,35 @@ class HMClient:
                 # Now wait for email input
                 for sel in email_selectors:
                     try:
-                        el = await page.wait_for_selector(sel, state="visible", timeout=6000)
+                        el = await page.wait_for_selector(sel, state="visible", timeout=8000)
                         if el:
                             email_el = el
                             break
                     except Exception:
                         continue
 
-            # Fallback: inspect all visible input elements
+            # Fallback: inspect all visible input elements in page and frames
             if not email_el:
-                all_inputs = await page.query_selector_all("input")
-                for inp in all_inputs:
-                    if await inp.is_visible():
-                        itype = (await inp.get_attribute("type") or "").lower()
-                        iname = (await inp.get_attribute("name") or "").lower()
-                        ipl = (await inp.get_attribute("placeholder") or "").lower()
-                        if "email" in iname or "email" in itype or "email" in ipl or "e-mail" in ipl:
-                            email_el = inp
-                            break
+                for target in [page] + page.frames:
+                    all_inputs = await target.query_selector_all("input")
+                    for inp in all_inputs:
+                        if await inp.is_visible():
+                            itype = (await inp.get_attribute("type") or "").lower()
+                            iname = (await inp.get_attribute("name") or "").lower()
+                            ipl = (await inp.get_attribute("placeholder") or "").lower()
+                            if "email" in iname or "email" in itype or "email" in ipl or "e-mail" in ipl or itype == "text":
+                                email_el = inp
+                                break
+                    if email_el:
+                        break
 
             if not email_el:
+                page_title = await page.title()
+                logger.error(f"Failed to find email field. Page title: '{page_title}', URL: '{page.url}'")
                 return {
                     "success": False,
                     "message": "Could not find email field on registration page",
-                    "details": "H&M may have updated their website layout. Please register manually.",
+                    "details": f"Page title: {page_title}. Please register manually if blocked by bot protection.",
                 }
 
             # 4. Fill email
@@ -488,8 +512,30 @@ class HMClient:
             context = await self.browser.get_context("hm")
             page = await context.new_page()
 
-            await page.goto(urls["login"], wait_until="domcontentloaded", timeout=30000)
+            try:
+                await page.goto(urls["login"], wait_until="networkidle", timeout=30000)
+            except Exception:
+                await page.goto(urls["login"], wait_until="domcontentloaded", timeout=30000)
+
             await asyncio.sleep(2)
+
+            # Dismiss OneTrust cookie banner
+            for c_sel in [
+                "#onetrust-accept-btn-handler",
+                "button#onetrust-accept-btn-handler",
+                "button:has-text('Alle Cookies akzeptieren')",
+                "button:has-text('Akzeptieren')",
+                "button:has-text('Accept all cookies')",
+                "button:has-text('Accept')",
+            ]:
+                try:
+                    c_btn = await page.query_selector(c_sel)
+                    if c_btn and await c_btn.is_visible():
+                        await c_btn.click()
+                        await asyncio.sleep(1)
+                        break
+                except Exception:
+                    pass
 
             if await self.browser.detect_captcha(page):
                 await progress_cb("🛡️ CAPTCHA detected! Please complete manually. Waiting...")
@@ -499,20 +545,51 @@ class HMClient:
 
             await progress_cb("🔑 Entering credentials...")
 
-            # Fill email
-            for sel in ["input[name='email']", "input[type='email']", "#email", "input[name='username']", "input[placeholder*='email' i]"]:
+            # Fill email across main page and frames
+            email_selectors = [
+                "input[type='email']",
+                "input[name='email']",
+                "input#email",
+                "input[id*='email' i]",
+                "input[data-testid*='email' i]",
+                "input[placeholder*='email' i]",
+                "input[placeholder*='e-mail' i]",
+            ]
+            email_el = None
+            for sel in email_selectors:
                 try:
-                    el = await page.query_selector(sel)
-                    if el and await el.is_visible():
-                        await el.fill(email)
+                    el = await page.wait_for_selector(sel, state="visible", timeout=8000)
+                    if el:
+                        email_el = el
                         break
                 except Exception:
                     continue
+
+            if not email_el:
+                for frame in page.frames:
+                    for sel in email_selectors:
+                        try:
+                            el = await frame.query_selector(sel)
+                            if el and await el.is_visible():
+                                email_el = el
+                                break
+                        except Exception:
+                            continue
+                    if email_el:
+                        break
+
+            if email_el:
+                await email_el.click()
+                await email_el.fill("")
+                await email_el.fill(email)
 
             # Click CONTINUE button if present (H&M 2-step login modal)
             for cont_sel in [
                 "button:has-text('CONTINUE')",
                 "button:has-text('Continue')",
+                "button:has-text('WEITER')",
+                "button:has-text('Weiter')",
+                "button:has-text('Fortfahren')",
                 "button[type='submit']",
                 "button[data-testid*='submit']",
             ]:
@@ -526,14 +603,20 @@ class HMClient:
                     continue
 
             # Fill password
-            for sel in ["input[name='password']", "input[type='password']", "#password"]:
+            password_el = None
+            for sel in ["input[type='password']", "input[name='password']", "input#password"]:
                 try:
-                    el = await page.query_selector(sel)
-                    if el and await el.is_visible():
-                        await el.fill(password)
+                    el = await page.wait_for_selector(sel, state="visible", timeout=10000)
+                    if el:
+                        password_el = el
                         break
                 except Exception:
                     continue
+
+            if password_el:
+                await password_el.click()
+                await password_el.fill("")
+                await password_el.fill(password)
 
             # Submit
             for sel in ["button[type='submit']", "button:has-text('Sign in')", "button:has-text('Log in')"]:
